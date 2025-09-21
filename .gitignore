@@ -1,0 +1,39 @@
+﻿# Build outputs
+**/bin/
+**/obj/
+
+# User-specific files
+**/*.user
+**/*.suo
+**/*.swp
+**/*.tmp
+
+# IDE folders
+.vs/
+.vscode/
+
+# Logs
+*.log
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Packages / NuGet
+*.nupkg
+*.snupkg
+*.nuspec
+packages/
+# اگر پکیج‌ها رو خودت تولید می‌کنی و نمی‌خوای نگه داری، پوشه _packages رو ignore کن:
+# _packages/
+
+# Docker stuff
+Dockerfile*
+*.dockerignore
+
+# Env / Secrets
+*.env
+secrets.json
+
+# Keep libs (we want to version control SharedMessaging copy)
+!_libs/**
