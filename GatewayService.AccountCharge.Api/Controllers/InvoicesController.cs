@@ -1,20 +1,16 @@
 ﻿using System.Net.Mime;
 using System.ComponentModel.DataAnnotations;
-using System.Linq;
 using Asp.Versioning;
 using GatewayService.AccountCharge.Application.Commands.CreateInvoice;
-using GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
-// ✨ قدیمی را حذف کن:
-// using GatewayService.AccountCharge.Application.Commands.AttachInvoiceAddress;
-// ✨ جدید را اضافه کن:
 using GatewayService.AccountCharge.Application.Commands.GenerateAndAttachAddress;
-
 using GatewayService.AccountCharge.Application.DTOs;
 using GatewayService.AccountCharge.Application.Queries.GetInvoiceDetails;
 using GatewayService.AccountCharge.Application.Queries.GetInvoiceStatus;
 using GatewayService.AccountCharge.Application.Services;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
+using GatewayService.AccountCharge.Application.Commands.ConfirmTxHash;
+
 
 namespace GatewayService.AccountCharge.Api.Controllers;
 
@@ -180,6 +176,33 @@ public sealed class InvoicesController : ControllerBase
         var applied = await _orchestrator.SyncInvoiceAsync(id, ct);
         return Ok(new { applied });
     }
+    // InvoicesController.cs
+    [HttpPost("{id:guid}/confirm-tx")]
+    [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> ConfirmByTxHash([FromRoute] Guid id, [FromBody] ConfirmTxRequest req, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req.TxHash))
+            return BadRequest(new { error = "txHash is required" });
+
+        var res = await _sender.Send(new ConfirmTxHashCommand(id, req.TxHash.Trim()), ct);
+
+        if (!res.FoundOnExchange)
+            return NotFound(new { error = "Transaction not found on exchange" });
+
+        // اگر مچ شد ولی به هر دلیلی Apply نشد، Reason برمی‌گرده
+        return Ok(new
+        {
+            res.InvoiceId,
+            res.FoundOnExchange,
+            res.Matched,
+            res.Applied,
+            res.Reason
+        });
+    }
+
+    public sealed class ConfirmTxRequest { public string TxHash { get; set; } = default!; }
 
     // -------------------------
     // HTTP Request/Response DTOs scoped to API

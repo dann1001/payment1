@@ -1,0 +1,15 @@
+version: "3.9"
+
+services:
+  accountcharge.api:
+    image: accountcharge.api:dev
+    container_name: accountcharge.api
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5000:8080"   # host:container
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      NOBITEX_API_TOKEN: "4504b3e0921f0af5e571a3e5a6e17f3b862423b7"
+

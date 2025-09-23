@@ -4,6 +4,7 @@ using GatewayService.AccountCharge.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace GatewayService.AccountCharge.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(AccountChargeDb))]
-    partial class AccountChargeDbModelSnapshot : ModelSnapshot
+    [Migration("20250922133046_AddUniqueIndex_On_InvoiceAppliedDeposits_TxHash")]
+    partial class AddUniqueIndex_On_InvoiceAppliedDeposits_TxHash
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder

@@ -1,4 +1,5 @@
 ﻿using GatewayService.AccountCharge.Domain.Invoices;
+using GatewayService.AccountCharge.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
@@ -49,23 +50,19 @@ public sealed class InvoiceConfiguration : IEntityTypeConfiguration<Invoice>
         b.Ignore(x => x.Payments);
 
         // -----------------------------
-        // InvoiceAddresses (owned collection, اسکالر)
+        // InvoiceAddresses (owned collection)
         // -----------------------------
         b.OwnsMany(x => x.Addresses, nav =>
         {
             nav.ToTable("InvoiceAddresses");
 
-            // Explicit FK (no shadow)
             nav.WithOwner().HasForeignKey(a => a.InvoiceId);
 
-            // Keys
             nav.HasKey(a => a.Id);
             nav.Property(a => a.Id).ValueGeneratedNever(); // client-generated Guid
 
-            // (optional) map FK column name explicitly
             nav.Property(a => a.InvoiceId).HasColumnName("InvoiceId").IsRequired();
 
-            // Fields
             nav.Property(a => a.WalletId).HasColumnName("WalletId").IsRequired();
             nav.Property(a => a.Currency).HasColumnName("WalletCurrency").HasMaxLength(16).IsRequired();
             nav.Property(a => a.Address).HasColumnName("DepositAddress").HasMaxLength(256).IsRequired();
@@ -73,17 +70,14 @@ public sealed class InvoiceConfiguration : IEntityTypeConfiguration<Invoice>
             nav.Property(a => a.Tag).HasColumnName("DepositTag").HasMaxLength(128);
             nav.Property(a => a.CreatedAt).HasColumnName("CreatedAt").IsRequired();
 
-            // Indexes
             nav.HasIndex(a => a.InvoiceId);
             nav.HasIndex(a => a.CreatedAt);
 
-            // Unique constraint to avoid duplicates per invoice/wallet
             nav.HasIndex(a => new { a.InvoiceId, a.Address, a.Network, a.Tag, a.WalletId }).IsUnique();
         });
 
-
         // ------------------------------------
-        // InvoiceAppliedDeposits (owned collection) — طبق مدل VO سابق شما
+        // InvoiceAppliedDeposits (owned collection)
         // ------------------------------------
         b.OwnsMany(x => x.AppliedDeposits, nav =>
         {
@@ -99,18 +93,18 @@ public sealed class InvoiceConfiguration : IEntityTypeConfiguration<Invoice>
             nav.Property(d => d.Confirmations).IsRequired();
             nav.Property(d => d.RequiredConfirmations).IsRequired();
 
-            // TransactionHash VO
-            nav.OwnsOne(d => d.TxHash, h =>
-            {
-                h.Property(v => v.Value)
-                 .HasColumnName("TxHash")
-                 .HasMaxLength(128)
-                 .IsRequired();
+            // ✅ TransactionHash به‌صورت اسکالر (با کانورتر) روی ستون TxHash ذخیره می‌شود
+            nav.Property(d => d.TxHash)
+               .HasConversion(
+                    toProvider => toProvider.Value,                // TransactionHash -> string
+                    fromProvider => new TransactionHash(fromProvider) // string -> TransactionHash
+                )
+               .HasColumnName("TxHash")
+               .HasMaxLength(128)
+               .IsRequired();
 
-                // توجه: اگر EF روی OwnsOne اجازه‌ی ایندکس مستقیم نداد،
-                // ایندکس را یک سطح بالاتر روی جدول بزنید:
-                // nav.HasIndex("TxHash").IsUnique();
-            });
+            // 👇 ایندکس یکتا روی InvoiceId + TxHash (دوباره‌اعمال نشدن یک Tx برای یک اینوویس)
+            nav.HasIndex(d => new { d.InvoiceId, d.TxHash }).IsUnique();
 
             // ChainAddress VO
             nav.OwnsOne(d => d.Address, addr =>
