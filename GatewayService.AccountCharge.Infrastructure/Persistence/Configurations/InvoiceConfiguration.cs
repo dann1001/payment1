@@ -86,7 +86,7 @@ public sealed class InvoiceConfiguration : IEntityTypeConfiguration<Invoice>
             nav.WithOwner().HasForeignKey(d => d.InvoiceId);
 
             nav.HasKey(d => d.Id);
-            nav.Property(d => d.Id).ValueGeneratedOnAdd();
+            nav.Property(d => d.Id).ValueGeneratedNever();
 
             nav.Property(d => d.ObservedAt).IsRequired();
             nav.Property(d => d.WasConfirmed).IsRequired();
@@ -106,7 +106,7 @@ public sealed class InvoiceConfiguration : IEntityTypeConfiguration<Invoice>
             // 👇 ایندکس یکتا روی InvoiceId + TxHash (دوباره‌اعمال نشدن یک Tx برای یک اینوویس)
             nav.HasIndex(d => new { d.InvoiceId, d.TxHash }).IsUnique();
 
-            // ChainAddress VO
+            // Infrastructure/Persistence/Configurations/InvoiceConfiguration.cs
             nav.OwnsOne(d => d.Address, addr =>
             {
                 addr.Property(x => x.Address)
@@ -116,8 +116,7 @@ public sealed class InvoiceConfiguration : IEntityTypeConfiguration<Invoice>
 
                 addr.Property(x => x.Network)
                     .HasColumnName("DepositNetwork")
-                    .HasMaxLength(32)
-                    .IsRequired();
+                    .HasMaxLength(32);                // <-- remove .IsRequired()
 
                 addr.Property(x => x.Tag)
                     .HasColumnName("DepositTag")

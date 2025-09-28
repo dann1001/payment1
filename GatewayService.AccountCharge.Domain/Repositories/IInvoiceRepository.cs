@@ -1,5 +1,6 @@
 ﻿using GatewayService.AccountCharge.Domain.Invoices;
 using GatewayService.AccountCharge.Domain.ValueObjects;
+using System.Linq.Expressions;
 
 namespace GatewayService.AccountCharge.Domain.Repositories;
 
@@ -25,4 +26,8 @@ public interface IInvoiceRepository
     Task AddAsync(Invoice invoice, CancellationToken ct = default);
 
     Task UpdateAsync(Invoice invoice, CancellationToken ct = default);
+
+    Task<bool> HasAppliedDepositAsync(Guid invoiceId, string txHash, CancellationToken ct = default);
+
+    Task<bool> ExistsAsync(Expression<Func<Invoice, bool>> predicate, CancellationToken ct = default);
 }

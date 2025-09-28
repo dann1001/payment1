@@ -7,7 +7,7 @@ namespace GatewayService.AccountCharge.Domain.Invoices;
 /// </summary>
 public sealed class AppliedDeposit : Entity
 {
-    // Keep invoice aggregate ownership; don't expose public setters
+    public Guid Id { get; private set; }                // GUID PK
     public Guid InvoiceId { get; private set; }
     public TransactionHash TxHash { get; private set; } = default!;
     public ChainAddress Address { get; private set; } = default!;
@@ -20,6 +20,7 @@ public sealed class AppliedDeposit : Entity
     private AppliedDeposit() { } // EF
 
     internal AppliedDeposit(
+
         Guid invoiceId,
         TransactionHash txHash,
         ChainAddress address,
@@ -29,6 +30,7 @@ public sealed class AppliedDeposit : Entity
         int requiredConfirmations,
         DateTimeOffset observedAt)
     {
+        Id = Guid.NewGuid();            // <<<< generate here
         InvoiceId = invoiceId;
         TxHash = txHash;
         Address = address;

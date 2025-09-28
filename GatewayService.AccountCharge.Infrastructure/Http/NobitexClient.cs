@@ -1,6 +1,7 @@
 ﻿using System.Net.Http.Json;
 using System.Text.Json;
 using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Application.Common; // <-- use AssetMapper
 using GatewayService.AccountCharge.Application.DTOs;
 using GatewayService.AccountCharge.Infrastructure.Options;
 using Microsoft.Extensions.Logging;
@@ -9,7 +10,7 @@ using Microsoft.Extensions.Options;
 namespace GatewayService.AccountCharge.Infrastructure.Http;
 
 /// <summary>
-/// Production-grade Nobitex client: status check, tolerant JSON parsing, and network normalization.
+/// Nobitex client with tolerant parsing + currency/network normalization.
 /// </summary>
 public sealed class NobitexClient : INobitexClient
 {
@@ -49,7 +50,8 @@ public sealed class NobitexClient : INobitexClient
                 var id = ReadIntFlexible(w, "id");
                 if (id == 0) id = ReadIntFlexible(w, "wallet");
 
-                var currency = (ReadString(w, "currency") ?? "").ToLowerInvariant();
+                // Keep lower-case for provider interactions; map to symbol only when building domain DTOs.
+                var currencyLower = (ReadString(w, "currency") ?? string.Empty).Trim().ToLowerInvariant();
 
                 string? network = null;
                 string? depAddr = null;
@@ -65,7 +67,7 @@ public sealed class NobitexClient : INobitexClient
                 list.Add(new WalletDto
                 {
                     Id = id,
-                    Currency = currency,
+                    Currency = currencyLower, // keep as-is for downstream provider calls
                     Network = network,
                     HasDepositAddress = !string.IsNullOrWhiteSpace(depAddr),
                     DepositAddress = string.IsNullOrWhiteSpace(depAddr) ? null : depAddr!.Trim(),
@@ -79,13 +81,13 @@ public sealed class NobitexClient : INobitexClient
 
     public async Task<GeneratedAddressDto> GenerateAddressAsync(string currency, string? network, CancellationToken ct)
     {
-        var normalizedCurrency = (currency ?? string.Empty).Trim().ToLowerInvariant();
-        var normalizedNetwork = NormalizeNetwork(normalizedCurrency, network);
+        var currencyLower = (currency ?? string.Empty).Trim().ToLowerInvariant();
+        var networkPayload = string.IsNullOrWhiteSpace(network) ? null : network.Trim();
 
         var payload = new Dictionary<string, object?>
         {
-            ["currency"] = normalizedCurrency,
-            ["network"] = string.IsNullOrWhiteSpace(normalizedNetwork) ? null : normalizedNetwork
+            ["currency"] = currencyLower,
+            ["network"] = networkPayload
         };
 
         using var req = new HttpRequestMessage(HttpMethod.Post, "/users/wallets/generate-address")
@@ -100,7 +102,6 @@ public sealed class NobitexClient : INobitexClient
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
-        // status check (even when HTTP 200)
         if (!IsOk(root))
         {
             var (code, message) = ReadError(root);
@@ -108,25 +109,22 @@ public sealed class NobitexClient : INobitexClient
             throw new InvalidOperationException($"Nobitex generate-address failed: code={code}, message={message}");
         }
 
-        // address + tag (aliases)
         var address = ReadString(root, "address") ?? ReadString(root, "depositAddress");
         var tag = ReadString(root, "memo") ?? ReadString(root, "destinationTag") ?? ReadString(root, "tag");
-
         if (string.IsNullOrWhiteSpace(address))
         {
             _log.LogError("Nobitex generate-address returned ok but no address. body={Body}", json);
             throw new InvalidOperationException("Nobitex did not return a deposit address.");
         }
 
-        // wallet id (optional)
         var walletId = ReadIntFlexible(root, "walletId");
         if (walletId == 0) walletId = ReadIntFlexible(root, "wallet");
 
         return new GeneratedAddressDto
         {
             WalletId = walletId,
-            Currency = normalizedCurrency,
-            Network = normalizedNetwork,
+            Currency = currencyLower,                     // provider case
+            Network = networkPayload,                    // as requested
             Address = address.Trim(),
             Tag = string.IsNullOrWhiteSpace(tag) ? null : tag.Trim(),
             CreatedAt = DateTimeOffset.UtcNow
@@ -162,20 +160,32 @@ public sealed class NobitexClient : INobitexClient
                 var txHash = ReadString(d, "txHash") ?? ReadString(d, "txid") ?? string.Empty;
                 var address = ReadString(d, "address") ?? string.Empty;
                 var memo = ReadString(d, "memo") ?? ReadString(d, "destinationTag") ?? ReadString(d, "tag");
-                var currency = (ReadString(d, "currency") ?? string.Empty).ToLowerInvariant();
-                var network = ReadString(d, "network") ?? string.Empty;
+                var symbol = ReadString(d, "currencySymbol");
+                var name = ReadString(d, "currency");
+                var currency = AssetMapper.NormalizeCurrencyFromProvider(symbol, name); // <-- key change
+
+                // network may be absent on deposits; try field, else infer from explorer URL
+                var networkRaw = ReadString(d, "network");
+                var explorerUrl = ReadString(d, "blockchainUrl");
+                var network = AssetMapper.NormalizeNetwork(networkRaw) ?? AssetMapper.InferNetworkFromUrl(explorerUrl);
+
                 var amt = ReadDecimalFlexible(d, "amount");
                 var conf = ReadIntFlexible(d, "confirmations");
                 var reqConf = ReadIntFlexible(d, "requiredConfirmations");
-                var created = ReadDateTimeOffsetFlexible(d, "createdAt") ?? DateTimeOffset.UtcNow;
 
-                // prefer explicit booleans if present; else derive
-                var wasConfirmedFlag =
-                       ReadBoolFlexible(d, "wasConfirmed")
+                // Prefer 'date'; fallback to nested 'transaction.created_at'
+                var created =
+                    ReadDateTimeOffsetFlexible(d, "date") ??
+                    ReadDateTimeOffsetFlexibleNested(d, "transaction", "created_at") ??
+                    ReadDateTimeOffsetFlexible(d, "created_at") ??
+                    DateTimeOffset.UtcNow;
+
+                // Prefer explicit confirmed flag: isConfirmed/confirmed/wasConfirmed
+                var confirmed =
+                    ReadBoolFlexible(d, "isConfirmed")
                     ?? ReadBoolFlexible(d, "confirmed")
-                    ?? (bool?)null;
-
-                var confirmed = wasConfirmedFlag ?? (reqConf > 0 ? conf >= reqConf : conf > 0);
+                    ?? ReadBoolFlexible(d, "wasConfirmed")
+                    ?? (reqConf > 0 ? conf >= reqConf : conf > 0);
 
                 list.Add(new IncomingDepositDto
                 {
@@ -184,8 +194,8 @@ public sealed class NobitexClient : INobitexClient
                     Tag = string.IsNullOrWhiteSpace(memo) ? null : memo,
                     TxHash = txHash,
                     Amount = amt,
-                    Currency = currency,
-                    Network = network,
+                    Currency = currency,   // <-- canonical symbol (e.g., "BNB")
+                    Network = network,    // normalized or null
                     Confirmations = conf,
                     RequiredConfirmations = reqConf,
                     CreatedAt = created,
@@ -217,6 +227,12 @@ public sealed class NobitexClient : INobitexClient
     private static string? ReadString(JsonElement e, string name)
         => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
 
+    private static string? ReadNestedString(JsonElement e, string parent, string child)
+        => e.TryGetProperty(parent, out var p) && p.ValueKind == JsonValueKind.Object
+           && p.TryGetProperty(child, out var c) && c.ValueKind == JsonValueKind.String
+                ? c.GetString()
+                : null;
+
     private static int ReadIntFlexible(JsonElement e, string name)
     {
         if (!e.TryGetProperty(name, out var v)) return 0;
@@ -241,6 +257,13 @@ public sealed class NobitexClient : INobitexClient
         return null;
     }
 
+    private static DateTimeOffset? ReadDateTimeOffsetFlexibleNested(JsonElement e, string parent, string child)
+    {
+        var s = ReadNestedString(e, parent, child);
+        if (s is null) return null;
+        return DateTimeOffset.TryParse(s, out var dto) ? dto : (DateTimeOffset?)null;
+    }
+
     private static bool? ReadBoolFlexible(JsonElement e, string name)
     {
         if (!e.TryGetProperty(name, out var v)) return null;
@@ -252,21 +275,6 @@ public sealed class NobitexClient : INobitexClient
             JsonValueKind.Number => v.TryGetInt32(out var i) ? i != 0 : (bool?)null,
             _ => null
         };
-    }
-
-    private static string? NormalizeNetwork(string? currencyLower, string? network)
-    {
-        if (string.IsNullOrWhiteSpace(network)) return null;
-        var n = network.Trim();
-
-        // Example normalization: USDT TRC20 -> TRX, ETH -> ERC20, BEP20 -> BSC
-        if (!string.IsNullOrEmpty(currencyLower) && currencyLower.Equals("usdt", StringComparison.Ordinal))
-        {
-            if (n.Equals("TRC20", StringComparison.OrdinalIgnoreCase)) return "TRX";
-            if (n.Equals("ETH", StringComparison.OrdinalIgnoreCase)) return "ERC20";
-            if (n.Equals("BEP20", StringComparison.OrdinalIgnoreCase)) return "BSC";
-        }
-        return n.ToUpperInvariant();
     }
 
     private async Task EnsureSuccessWithRateNotes(HttpResponseMessage res, CancellationToken ct)
