@@ -201,6 +201,96 @@ public sealed class InvoicesController : ControllerBase
             res.Reason
         });
     }
+    // GET: /api/v1/invoices/{id}/transactions?limit=200&sinceUtc=2025-09-01T00:00:00Z&onlyInvoiceAddresses=true
+    [HttpGet("{id:guid}/transactions")]
+    [ProducesResponseType(typeof(IReadOnlyList<InvoiceTransactionItem>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ListTransactions(
+        [FromRoute] Guid id,
+        [FromQuery, Range(1, 200)] int? limit,
+        [FromQuery] DateTimeOffset? sinceUtc,
+        [FromQuery] bool onlyInvoiceAddresses = true,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var list = await _sender.Send(
+                new GatewayService.AccountCharge.Application.Queries.GetInvoiceTransactions.GetInvoiceTransactionsQuery(
+                    InvoiceId: id,
+                    Limit: limit,
+                    SinceUtc: sinceUtc,
+                    OnlyInvoiceAddresses: onlyInvoiceAddresses
+                ), ct);
+
+            // Map to lightweight HTTP DTO
+            var http = list.Select(x => new InvoiceTransactionItem
+            {
+                TxHash = x.TxHash!,
+                Address = x.Address,
+                Network = x.Network,
+                Tag = x.Tag,
+                Amount = x.Amount,
+                Currency = x.Currency,
+                Confirmed = x.Confirmed,
+                Confirmations = x.Confirmations,
+                RequiredConfirmations = x.RequiredConfirmations,
+                CreatedAt = x.CreatedAt
+            }).ToList();
+
+            return Ok(http);
+        }
+        catch (KeyNotFoundException)
+        {
+            return NotFound();
+        }
+    }
+    // GET: /api/v1/invoices/{id}/transactions/all
+    [HttpGet("{id:guid}/transactions/all")]
+    [ProducesResponseType(typeof(IReadOnlyList<InvoiceTransactionItem>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ListAllTransactions([FromRoute] Guid id, CancellationToken ct = default)
+    {
+        try
+        {
+            var list = await _sender.Send(
+                new GatewayService.AccountCharge.Application.Queries.GetInvoiceTransactionsAll.GetInvoiceTransactionsAllQuery(id),
+                ct);
+
+            var http = list.Select(x => new InvoiceTransactionItem
+            {
+                TxHash = x.TxHash!,
+                Address = x.Address,
+                Network = x.Network,
+                Tag = x.Tag,
+                Amount = x.Amount,
+                Currency = x.Currency,
+                Confirmed = x.Confirmed,
+                Confirmations = x.Confirmations,
+                RequiredConfirmations = x.RequiredConfirmations,
+                CreatedAt = x.CreatedAt
+            }).ToList();
+
+            return Ok(http);
+        }
+        catch (KeyNotFoundException)
+        {
+            return NotFound();
+        }
+    }
+
+    public sealed class InvoiceTransactionItem
+    {
+        public string TxHash { get; set; } = default!;
+        public string Address { get; set; } = default!;
+        public string? Network { get; set; }
+        public string? Tag { get; set; }
+        public decimal Amount { get; set; }
+        public string Currency { get; set; } = default!;
+        public bool Confirmed { get; set; }
+        public int Confirmations { get; set; }
+        public int RequiredConfirmations { get; set; }
+        public DateTimeOffset CreatedAt { get; set; }
+    }
 
     public sealed class ConfirmTxRequest { public string TxHash { get; set; } = default!; }
 
