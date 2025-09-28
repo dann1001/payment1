@@ -87,10 +87,13 @@ public sealed class Invoice : Entity
     }
 
     public bool OwnsAddress(ChainAddress addr) =>
-        _addresses.Any(a =>
-            string.Equals(a.Address, addr.Address, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(a.Network ?? string.Empty, addr.Network ?? string.Empty, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(a.Tag ?? string.Empty, addr.Tag ?? string.Empty, StringComparison.Ordinal));
+    _addresses.Any(a =>
+        string.Equals(a.Address, addr.Address, StringComparison.OrdinalIgnoreCase) &&
+        (string.IsNullOrEmpty(addr.Network) ||
+         string.Equals(a.Network ?? string.Empty, addr.Network ?? string.Empty, StringComparison.OrdinalIgnoreCase)) &&
+        string.Equals(a.Tag ?? string.Empty, addr.Tag ?? string.Empty, StringComparison.Ordinal)
+    );
+
 
     public bool IsExpired(DateTime? now = null)
     {

@@ -61,11 +61,12 @@ public sealed class EfInvoiceRepository : IInvoiceRepository
             .Include(i => i.Addresses)
             .Include(i => i.AppliedDeposits)
             .FirstOrDefaultAsync(i =>
-                i.Addresses.Any(a =>
-                    a.Address.ToLower() == addr &&
-                    ((a.Network ?? string.Empty).ToLower() == net) &&
-                    ((a.Tag == null && tag == null) || a.Tag == tag)
-                ), ct);
+               i.Addresses.Any(a =>
+  a.Address.ToLower() == addr &&
+  (string.IsNullOrEmpty(net) || (a.Network ?? "").ToLower() == net) &&
+  ((a.Tag == null && tag == null) || a.Tag == tag)
+)
+, ct);
     }
 
 
