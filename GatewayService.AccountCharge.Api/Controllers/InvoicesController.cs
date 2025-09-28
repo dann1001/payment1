@@ -168,7 +168,6 @@ public sealed class InvoicesController : ControllerBase
         }
     }
 
-    /// <summary>Manually sync deposits and apply matches for a specific invoice by Id.</summary>
     [HttpPost("{id:guid}/sync")]
     [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
     public async Task<IActionResult> ManualSync([FromRoute] Guid id, CancellationToken ct)
@@ -176,7 +175,6 @@ public sealed class InvoicesController : ControllerBase
         var applied = await _orchestrator.SyncInvoiceAsync(id, ct);
         return Ok(new { applied });
     }
-    // InvoicesController.cs
     [HttpPost("{id:guid}/confirm-tx")]
     [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -191,7 +189,6 @@ public sealed class InvoicesController : ControllerBase
         if (!res.FoundOnExchange)
             return NotFound(new { error = "Transaction not found on exchange" });
 
-        // اگر مچ شد ولی به هر دلیلی Apply نشد، Reason برمی‌گرده
         return Ok(new
         {
             res.InvoiceId,
@@ -201,7 +198,6 @@ public sealed class InvoicesController : ControllerBase
             res.Reason
         });
     }
-    // GET: /api/v1/invoices/{id}/transactions?limit=200&sinceUtc=2025-09-01T00:00:00Z&onlyInvoiceAddresses=true
     [HttpGet("{id:guid}/transactions")]
     [ProducesResponseType(typeof(IReadOnlyList<InvoiceTransactionItem>), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -292,8 +288,11 @@ public sealed class InvoicesController : ControllerBase
         public DateTimeOffset CreatedAt { get; set; }
     }
 
-    public sealed class ConfirmTxRequest { public string TxHash { get; set; } = default!; }
-
+    public sealed class ConfirmTxRequest
+    {
+        public string TxHash { get; set; } = default!;
+        public string Network { get; set; } = default!;
+    }
     // -------------------------
     // HTTP Request/Response DTOs scoped to API
     // -------------------------

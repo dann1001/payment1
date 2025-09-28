@@ -51,21 +51,23 @@ public sealed class EfInvoiceRepository : IInvoiceRepository
 
     public async Task<Invoice?> GetByAddressAsync(ChainAddress chainAddress, CancellationToken ct = default)
     {
-        var addr = chainAddress.Address.ToLowerInvariant();
-        var net = (chainAddress.Network ?? string.Empty).ToLowerInvariant();
-        var tag = chainAddress.Tag;
+        // Pre-normalize the constants once (client-side)
+        var addr = chainAddress.Address.ToLower();                 // NOTE: not ToLowerInvariant()
+        var net = (chainAddress.Network ?? string.Empty).ToLower();
+        var tag = chainAddress.Tag; // keep nullable as-is
 
         return await _db.Invoices
-            .AsTracking() // we intend to modify matched invoice
+            .AsTracking()
             .Include(i => i.Addresses)
             .Include(i => i.AppliedDeposits)
             .FirstOrDefaultAsync(i =>
                 i.Addresses.Any(a =>
-                    a.Address.ToLowerInvariant() == addr &&
-                    (a.Network ?? string.Empty).ToLowerInvariant() == net &&
+                    a.Address.ToLower() == addr &&
+                    ((a.Network ?? string.Empty).ToLower() == net) &&
                     ((a.Tag == null && tag == null) || a.Tag == tag)
                 ), ct);
     }
+
 
     public async Task<bool> ExistsAsync(Expression<Func<Invoice, bool>> predicate, CancellationToken ct = default)
         => await _db.Invoices.AnyAsync(predicate, ct);
