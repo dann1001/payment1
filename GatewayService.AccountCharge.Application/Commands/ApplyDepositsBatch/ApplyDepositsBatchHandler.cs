@@ -1,9 +1,9 @@
-﻿using GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
-using MediatR;
+﻿using MediatR;
 
 namespace GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
 
-public sealed class ApplyDepositsBatchHandler : IRequestHandler<ApplyDepositsBatchCommand, ApplyDepositsBatchResult>
+public sealed class ApplyDepositsBatchHandler
+    : IRequestHandler<ApplyDepositsBatchCommand, ApplyDepositsBatchResult>
 {
     private readonly IMediator _mediator;
 
@@ -15,9 +15,18 @@ public sealed class ApplyDepositsBatchHandler : IRequestHandler<ApplyDepositsBat
 
         foreach (var d in request.Deposits)
         {
-            var res = await _mediator.Send(new ApplyDepositCommand(
-                d.TxHash, d.Address, d.Network, d.Tag, d.Amount, d.Currency, d.Confirmed,
-                d.Confirmations, d.RequiredConfirmations, d.CreatedAt
+            var res = await _mediator.Send(new ApplyDepositToInvoiceCommand(
+                InvoiceId: d.InvoiceId,   // ✅ الان داریم
+                TxHash: d.TxHash,
+                Address: d.Address,
+                Network: d.Network,
+                Tag: d.Tag,
+                Amount: d.Amount,
+                Currency: d.Currency,
+                Confirmed: d.Confirmed,
+                Confirmations: d.Confirmations,
+                RequiredConfirmations: d.RequiredConfirmations,
+                CreatedAt: d.CreatedAt
             ), ct);
 
             if (!res.Matched) { rejected++; continue; }

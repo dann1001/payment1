@@ -19,17 +19,14 @@ public sealed class EfInvoiceRepository : IInvoiceRepository
 
     public Task UpdateAsync(Invoice invoice, CancellationToken ct = default)
     {
-        // Safer: if already tracked, do nothing. If detached, just Attach (no full Update)
         var entry = _db.Entry(invoice);
         if (entry.State == EntityState.Detached)
         {
             _db.Invoices.Attach(invoice);
-            // rely on tracked changes; don't mark Modified blindly to avoid false concurrency hits
         }
         return Task.CompletedTask;
     }
 
-    // For write scenarios use tracking (includes children)
     public async Task<Invoice?> GetByIdAsync(Guid id, CancellationToken ct = default)
     {
         return await _db.Invoices
@@ -39,7 +36,6 @@ public sealed class EfInvoiceRepository : IInvoiceRepository
             .FirstOrDefaultAsync(i => i.Id == id, ct);
     }
 
-    // Read-only (for query/display)
     public async Task<Invoice?> GetByNumberAsync(string invoiceNumber, CancellationToken ct = default)
     {
         return await _db.Invoices
@@ -49,6 +45,7 @@ public sealed class EfInvoiceRepository : IInvoiceRepository
             .FirstOrDefaultAsync(i => i.InvoiceNumber == invoiceNumber, ct);
     }
 
+    // ⚠️ Legacy path (not used in new TxHash-claim flow)
     public async Task<Invoice?> GetByAddressAsync(ChainAddress chainAddress, CancellationToken ct = default)
     {
         var addr = chainAddress.Address.ToLower();
@@ -62,6 +59,7 @@ public sealed class EfInvoiceRepository : IInvoiceRepository
                 x.a.Address.ToLower() == addr &&
                 (string.IsNullOrEmpty(net) || (x.a.Network ?? "").ToLower() == net) &&
                 ((x.a.Tag == null && tag == null) || x.a.Tag == tag))
+            .OrderByDescending(x => x.Id) // harmless tie-breaker
             .Select(x => x.Id)
             .FirstOrDefaultAsync(ct);
 
@@ -78,13 +76,9 @@ public sealed class EfInvoiceRepository : IInvoiceRepository
             .FirstOrDefaultAsync(i => i.Id == invoiceId, ct);
     }
 
-
-    // Infrastructure/Repositories/EfInvoiceRepository.cs
     public async Task<bool> HasAppliedDepositAsync(Guid invoiceId, string txHash, CancellationToken ct = default)
     {
-        var th = new TransactionHash(txHash); // let EF apply the ValueConverter
-
-        // Filter inside SelectMany and avoid string methods on VO
+        var th = new TransactionHash(txHash);
         return await _db.Invoices
             .AsNoTracking()
             .Where(i => i.Id == invoiceId)
@@ -92,8 +86,18 @@ public sealed class EfInvoiceRepository : IInvoiceRepository
             .AnyAsync(ct);
     }
 
-
+    // ✅ Global TxHash check
+    public async Task<bool> HasAnyAppliedDepositAsync(string txHash, CancellationToken ct = default)
+    {
+        var th = new TransactionHash(txHash);
+        return await _db.Invoices
+            .AsNoTracking()
+            .SelectMany(i => i.AppliedDeposits)
+            .AnyAsync(d => d.TxHash == th, ct);
+    }
 
     public async Task<bool> ExistsAsync(Expression<Func<Invoice, bool>> predicate, CancellationToken ct = default)
         => await _db.Invoices.AnyAsync(predicate, ct);
+
+
 }

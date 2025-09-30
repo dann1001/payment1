@@ -2,10 +2,11 @@
 
 namespace GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
 
-public sealed record ApplyDepositCommand(
+public sealed record ApplyDepositToInvoiceCommand(
+    Guid InvoiceId,
     string TxHash,
     string Address,
-    string Network,
+    string? Network,
     string? Tag,
     decimal Amount,
     string Currency,
@@ -14,10 +15,25 @@ public sealed record ApplyDepositCommand(
     int RequiredConfirmations,
     DateTimeOffset CreatedAt
 ) : IRequest<ApplyDepositResult>;
-
+/// <summary>Result of applying a deposit to an invoice.</summary>
 public sealed record ApplyDepositResult(
     bool Matched,
-    bool Applied,           // applied (true) or idempotent/no-op (false)
-    string? Reason,         // why not applied (if any)
+    bool Applied,
+    string Reason,
     Guid? InvoiceId
 );
+
+public sealed class DepositForInvoiceDto
+{
+    public Guid InvoiceId { get; init; }   // 💡 اضافه شده
+    public string TxHash { get; init; } = default!;
+    public string Address { get; init; } = default!;
+    public string? Network { get; init; }
+    public string? Tag { get; init; }
+    public decimal Amount { get; init; }
+    public string Currency { get; init; } = default!;
+    public bool Confirmed { get; init; }
+    public int Confirmations { get; init; }
+    public int RequiredConfirmations { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+}

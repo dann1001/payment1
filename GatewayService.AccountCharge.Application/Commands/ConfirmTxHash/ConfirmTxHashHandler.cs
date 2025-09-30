@@ -1,6 +1,6 @@
-﻿// Application/Commands/ConfirmTxHash/ConfirmTxHashHandler.cs
-using GatewayService.AccountCharge.Application.Abstractions;
+﻿using GatewayService.AccountCharge.Application.Abstractions;
 using GatewayService.AccountCharge.Application.DTOs;
+using GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
 using GatewayService.AccountCharge.Domain.Repositories;
 using GatewayService.AccountCharge.Domain.ValueObjects;
 using MediatR;
@@ -14,7 +14,6 @@ public sealed class ConfirmTxHashHandler
     private readonly INobitexClient _nobitex;
     private readonly IMediator _mediator;
 
-    // می‌تونی این‌ها را از کانفیگ بگیری
     private const int FetchLimitPerWallet = 200;
     private static readonly TimeSpan Lookback = TimeSpan.FromDays(7);
 
@@ -30,56 +29,46 @@ public sealed class ConfirmTxHashHandler
         var invoice = await _repo.GetByIdAsync(request.InvoiceId, ct)
             ?? throw new KeyNotFoundException("Invoice not found.");
 
-        var txHash = request.TxHash.Trim();
-        if (txHash.Length == 0)
+        var txHashStr = request.TxHash?.Trim();
+        if (string.IsNullOrWhiteSpace(txHashStr))
             return new ConfirmTxHashResult(invoice.Id, false, false, false, "Empty txHash");
+
+        // Global guard: already applied anywhere?
+        if (await _repo.HasAnyAppliedDepositAsync(txHashStr, ct))
+            return new ConfirmTxHashResult(invoice.Id, true, false, false, "Already applied (global)");
 
         var walletIds = invoice.Addresses.Select(a => a.WalletId).Distinct().ToArray();
         if (walletIds.Length == 0)
             return new ConfirmTxHashResult(invoice.Id, false, false, false, "Invoice has no wallet/addresses");
 
-        // از ۷ روز گذشته بگیر (می‌تونی null بدی اگر همه‌ی تاریخ را می‌خوای)
         var since = DateTimeOffset.UtcNow - Lookback;
 
         IncomingDepositDto? found = null;
         foreach (var wid in walletIds)
         {
-            // ابستراکشن فعلی: (walletId, limit, since)
             var deposits = await _nobitex.GetRecentDepositsAsync(wid, FetchLimitPerWallet, since, ct);
-
-            // مقایسه‌ی Case-insensitive روی TxHash
             found = deposits.FirstOrDefault(d =>
-                string.Equals(d.TxHash?.Trim(), txHash, StringComparison.OrdinalIgnoreCase));
-
-            if (found is not null)
-                break;
+                string.Equals(d.TxHash?.Trim(), txHashStr, StringComparison.OrdinalIgnoreCase));
+            if (found is not null) break;
         }
 
         if (found is null)
-            return new ConfirmTxHashResult(invoice.Id, FoundOnExchange: false, Matched: false, Applied: false, Reason: "Not found");
+            return new ConfirmTxHashResult(invoice.Id, false, false, false, "Not found");
 
-        // حالا تلاش برای Apply به همین اینوویس
-        var addr = new ChainAddress(found.Address, found.Network, found.Tag);
-
-        var apply = await _mediator.Send(new ApplyDeposit.ApplyDepositCommand(
-            TxHash: found.TxHash,
-            Address: addr.Address,
-            Network: addr.Network,
-            Tag: addr.Tag,
+        var apply = await _mediator.Send(new ApplyDepositToInvoiceCommand(
+            InvoiceId: invoice.Id,
+            TxHash: found.TxHash!,
+            Address: found.Address,
+            Network: found.Network,
+            Tag: found.Tag,
             Amount: found.Amount,
-            Currency: found.Currency,                 // طبق DTO: lowercase
+            Currency: found.Currency,
             Confirmed: found.Confirmed,
             Confirmations: found.Confirmations,
             RequiredConfirmations: found.RequiredConfirmations,
             CreatedAt: found.CreatedAt
         ), ct);
 
-        return new ConfirmTxHashResult(
-            invoice.Id,
-            FoundOnExchange: true,
-            Matched: apply.Matched,   // فقط اگر آدرس/شبکه/تگ به یکی از Addressهای همین اینوویس بخوره
-            Applied: apply.Applied,   // اگر قبلاً اعمال نشده باشد → true
-            Reason: apply.Reason
-        );
+        return new ConfirmTxHashResult(invoice.Id, true, apply.Matched, apply.Applied, apply.Reason);
     }
 }

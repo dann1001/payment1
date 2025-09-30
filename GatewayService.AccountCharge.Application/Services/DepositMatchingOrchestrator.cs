@@ -38,41 +38,43 @@ public sealed class DepositMatchingOrchestrator
 
         foreach (var addr in invoice.Addresses)
         {
-            // invoice.CreatedAt = DateTime → convert to DateTimeOffset (UTC)
             var since = new DateTimeOffset(invoice.CreatedAt, TimeSpan.Zero);
-
-            // pull recent deposits for this wallet
             var deposits = await _nobitex.GetRecentDepositsAsync(addr.WalletId, limit: 30, since: since, ct);
 
             foreach (var d in deposits)
             {
+                // 🔒 skip globally-applied txs
+                if (!string.IsNullOrWhiteSpace(d.TxHash) &&
+                    await _invoices.HasAnyAppliedDepositAsync(d.TxHash!, ct))
+                {
+                    continue;
+                }
+
                 // currency guard
                 if (!string.Equals(d.Currency, invoice.ExpectedAmount.Currency, StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                // tag/memo guard when our stored address has a tag
+                // optional tag/memo guard
                 if (!string.IsNullOrWhiteSpace(addr.Tag) &&
                     !string.Equals(addr.Tag, d.Tag ?? string.Empty, StringComparison.Ordinal))
                     continue;
 
-                // build Value Objects for domain
                 var chain = new ChainAddress(d.Address, d.Network ?? string.Empty, d.Tag);
                 var money = new Money(d.Amount, d.Currency);
                 var pm = _opts.Get(d.Currency, d.Network ?? string.Empty);
 
                 var incoming = new IncomingDeposit(
-                    new TransactionHash(d.TxHash),
+                    new TransactionHash(d.TxHash!),
                     chain,
                     money,
                     d.Confirmed,
                     d.Confirmations,
                     d.RequiredConfirmations,
-                    d.CreatedAt // DateTimeOffset
+                    d.CreatedAt
                 );
 
                 var ok = invoice.TryApplyDeposit(incoming, pm, out var reason);
 
-                // count only real applies (idempotent "Already applied" را نشمار)
                 if (ok && !string.Equals(reason, "Already applied", StringComparison.OrdinalIgnoreCase))
                     applied++;
             }
@@ -81,5 +83,4 @@ public sealed class DepositMatchingOrchestrator
         await _uow.SaveChangesAsync(ct);
         return applied;
     }
-
 }

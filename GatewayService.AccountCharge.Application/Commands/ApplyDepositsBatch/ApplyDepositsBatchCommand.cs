@@ -4,7 +4,7 @@ using MediatR;
 namespace GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
 
 public sealed record ApplyDepositsBatchCommand(
-    IReadOnlyList<IncomingDepositDto> Deposits
+    IReadOnlyList<DepositForInvoiceDto> Deposits
 ) : IRequest<ApplyDepositsBatchResult>;
 
 public sealed record ApplyDepositsBatchResult(
