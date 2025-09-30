@@ -35,23 +35,22 @@ public static class DependencyInjection
         var cs = configuration.GetConnectionString("AccountChargeDb")
                  ?? throw new InvalidOperationException("Missing connection string 'AccountChargeDb'");
         services.AddDbContext<AccountChargeDb>(opt =>
-       opt.UseSqlServer(cs)
-          .EnableSensitiveDataLogging()      // نمایش مقادیر پارامترها
-          .EnableDetailedErrors()            // جزئیات بیشتر برای خطاها
-          .LogTo(Console.WriteLine,          // مقصد لاگ (می‌تونی لاگر هم بذاری)
-              new[]
-              {
-               Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.CommandExecuting,
-               Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.CommandExecuted,
-               Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.ContextDisposed,
-               Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.SaveChangesStarting,
-               Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.SaveChangesCompleted
-              },
-              Microsoft.Extensions.Logging.LogLevel.Information,
-              DbContextLoggerOptions.SingleLine | DbContextLoggerOptions.UtcTime // آپشن‌های اضافی برای خوانایی
-          )
-   );
-
+           opt.UseSqlServer(cs)
+              .EnableSensitiveDataLogging()      // نمایش مقادیر پارامترها
+              .EnableDetailedErrors()            // جزئیات بیشتر برای خطاها
+              .LogTo(Console.WriteLine,          // مقصد لاگ (می‌تونی لاگر هم بذاری)
+                  new[]
+                  {
+                   Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.CommandExecuting,
+                   Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.CommandExecuted,
+                   Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.ContextDisposed,
+                   Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.SaveChangesStarting,
+                   Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.SaveChangesCompleted
+                  },
+                  Microsoft.Extensions.Logging.LogLevel.Information,
+                  DbContextLoggerOptions.SingleLine | DbContextLoggerOptions.UtcTime // آپشن‌های اضافی برای خوانایی
+              )
+       );
 
         // UoW & Repositories
         services.AddScoped<IUnitOfWork, UnitOfWork>();
@@ -62,6 +61,7 @@ public static class DependencyInjection
 
         // HttpClient (Typed) with base address, UA, and Token header
         services.AddNobitexHttp(configuration);
+        services.AddAccountingHttp(configuration);   // ✅ merged in here
 
         // Providers / Generators
         services.AddScoped<IPaymentMatchingOptionsProvider, ConfigPaymentMatchingOptionsProvider>();

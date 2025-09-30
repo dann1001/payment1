@@ -1,17 +1,15 @@
-﻿using System.Net.Http.Json;
-using System.Text.Json;
+﻿using System.Text.Json;
 using GatewayService.AccountCharge.Application.Abstractions;
 using GatewayService.AccountCharge.Application.Common; // <-- use AssetMapper
 using GatewayService.AccountCharge.Application.DTOs;
 using GatewayService.AccountCharge.Infrastructure.Options;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Net.Http.Json;
 
 namespace GatewayService.AccountCharge.Infrastructure.Http;
 
-/// <summary>
-/// Nobitex client with tolerant parsing + currency/network normalization.
-/// </summary>
+
 public sealed class NobitexClient : INobitexClient
 {
     private readonly HttpClient _http;

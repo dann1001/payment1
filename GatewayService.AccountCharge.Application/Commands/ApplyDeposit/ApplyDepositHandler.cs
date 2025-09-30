@@ -1,11 +1,13 @@
-﻿using GatewayService.AccountCharge.Application.Abstractions;
+﻿// D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\ApplyDeposit\ApplyDepositToInvoiceHandler.cs
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
 using GatewayService.AccountCharge.Domain.Invoices;
 using GatewayService.AccountCharge.Domain.Repositories;
 using GatewayService.AccountCharge.Domain.ValueObjects;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
-
-namespace GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
+using Microsoft.Extensions.Logging;
+// ...existing usings
 
 public sealed class ApplyDepositToInvoiceHandler
     : IRequestHandler<ApplyDepositToInvoiceCommand, ApplyDepositResult>
@@ -13,12 +15,21 @@ public sealed class ApplyDepositToInvoiceHandler
     private readonly IInvoiceRepository _repo;
     private readonly IUnitOfWork _uow;
     private readonly IPaymentMatchingOptionsProvider _optsProvider;
+    private readonly IAccountingClient _accounting;                     // <-- ADD
+    private readonly ILogger<ApplyDepositToInvoiceHandler> _logger;     // <-- ADD
 
-    public ApplyDepositToInvoiceHandler(IInvoiceRepository repo, IUnitOfWork uow, IPaymentMatchingOptionsProvider optsProvider)
+    public ApplyDepositToInvoiceHandler(
+        IInvoiceRepository repo,
+        IUnitOfWork uow,
+        IPaymentMatchingOptionsProvider optsProvider,
+        IAccountingClient accounting,                                    // <-- ADD
+        ILogger<ApplyDepositToInvoiceHandler> logger)                    // <-- ADD
     {
         _repo = repo;
         _uow = uow;
         _optsProvider = optsProvider;
+        _accounting = accounting;                                        // <-- ADD
+        _logger = logger;                                                // <-- ADD
     }
 
     public async Task<ApplyDepositResult> Handle(ApplyDepositToInvoiceCommand request, CancellationToken ct)
@@ -31,15 +42,12 @@ public sealed class ApplyDepositToInvoiceHandler
 
         var txHash = new TransactionHash(request.TxHash);
 
-        // 🔒 Global guard: if already applied anywhere, stop
         if (await _repo.HasAnyAppliedDepositAsync(txHash.Value, ct))
             return new ApplyDepositResult(true, false, "Already applied (global)", invoice.Id);
 
-        // DB guard for this invoice (idempotency)
         if (await _repo.HasAppliedDepositAsync(invoice.Id, txHash.Value, ct))
             return new ApplyDepositResult(true, false, "Already applied", invoice.Id);
 
-        // Build incoming
         var incoming = new IncomingDeposit(
             txHash,
             new ChainAddress(request.Address, request.Network, request.Tag),
@@ -52,7 +60,6 @@ public sealed class ApplyDepositToInvoiceHandler
 
         var opts = _optsProvider.Get(request.Currency, request.Network);
 
-        // 💡 With static address, set RequireKnownAddress=false in config
         var ok = invoice.TryApplyDeposit(incoming, opts, out var reason);
         if (!ok)
             return new ApplyDepositResult(true, false, reason, invoice.Id);
@@ -60,12 +67,53 @@ public sealed class ApplyDepositToInvoiceHandler
         try
         {
             await _repo.UpdateAsync(invoice, ct);
-            await _uow.SaveChangesAsync(ct);
-            return new ApplyDepositResult(true, reason != "Already applied", reason, invoice.Id);
+            await _uow.SaveChangesAsync(ct); // ✅ committed
+
+            // ---- CALL ACCOUNTING (fire-and-forget semantics) ----
+            try
+            {
+                // Try to extract ExternalCustomerId from invoice.CustomerId (Guid or string Guid)
+                Guid externalCustomerId;
+
+                var prop = invoice.GetType().GetProperty("CustomerId");
+                var raw = prop?.GetValue(invoice);
+
+                if (raw is Guid gid)
+                {
+                    externalCustomerId = gid;
+                }
+                else if (raw is string s && Guid.TryParse(s, out var g2))
+                {
+                    externalCustomerId = g2;
+                }
+                else
+                {
+                    throw new InvalidOperationException("Invoice.CustomerId must be a Guid (or Guid string).");
+                }
+
+                await _accounting.CreateDepositAsync(
+                    externalCustomerId: externalCustomerId,
+                    amount: request.Amount,
+                    currency: request.Currency.ToUpperInvariant(),
+                    occurredAt: request.CreatedAt,
+                    idempotencyKey: request.TxHash,     // helps prevent duplicates if you add support serverside
+                    ct: ct
+                );
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Accounting post failed for Invoice {InvoiceId} / Tx {TxHash}. " +
+                    "Invoice already updated — please retry out-of-band.",
+                    invoice.Id, request.TxHash);
+                // Intentionally swallow: invoice state is authoritative here.
+            }
+            // ------------------------------------------------------
+
+            return new ApplyDepositResult(true, true, reason, invoice.Id);
         }
         catch (DbUpdateException ex) when (IsUniqueViolation(ex))
         {
-            // Likely hit the global unique TxHash index
             return new ApplyDepositResult(true, false, "Already applied (db-unique)", invoice.Id);
         }
     }
