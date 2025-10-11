@@ -54,11 +54,15 @@ builder.Services.AddApiVersioning(options =>
     options.SubstituteApiVersionInUrl = true; // replace {version} in route
 });
 
-// CORS (dev)
-builder.Services.AddCors(o => o.AddPolicy("AllowAll", p => p
-    .AllowAnyOrigin()
-    .AllowAnyHeader()
-    .AllowAnyMethod()));
+builder.Services.AddCors(opt =>
+{
+    opt.AddPolicy("InnerNetwork", b =>
+        b.WithOrigins(
+            "http://172.31.18.2:3000",    // Frontend dev
+            "http://localhost:3000")      // Optional local fallback
+         .AllowAnyHeader()
+         .AllowAnyMethod());
+});
 
 var app = builder.Build();
 
