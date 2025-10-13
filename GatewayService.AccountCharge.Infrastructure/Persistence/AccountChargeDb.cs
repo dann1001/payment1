@@ -11,6 +11,7 @@ public sealed class AccountChargeDb : DbContext
 
     // Aggregates
     public DbSet<Domain.Invoices.Invoice> Invoices => Set<Domain.Invoices.Invoice>();
+    public DbSet<Domain.PrepaidInvoices.PrepaidInvoice> PrepaidInvoices => Set<Domain.PrepaidInvoices.PrepaidInvoice>(); // 👈 جدید
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
