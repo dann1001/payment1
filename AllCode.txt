@@ -1,0 +1,3499 @@
+﻿=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Api\Controllers\InvoicesController.cs ===
+using System.Net.Mime;
+using System.ComponentModel.DataAnnotations;
+using Asp.Versioning;
+using GatewayService.AccountCharge.Application.Commands.CreateInvoice;
+using GatewayService.AccountCharge.Application.Commands.GenerateAndAttachAddress;
+using GatewayService.AccountCharge.Application.DTOs;
+using GatewayService.AccountCharge.Application.Queries.GetInvoiceDetails;
+using GatewayService.AccountCharge.Application.Queries.GetInvoiceStatus;
+using GatewayService.AccountCharge.Application.Services;
+using MediatR;
+using Microsoft.AspNetCore.Mvc;
+using GatewayService.AccountCharge.Application.Commands.ConfirmTxHash;
+
+
+namespace GatewayService.AccountCharge.Api.Controllers;
+
+[ApiController]
+[ApiVersion("1.0")]
+[Route("api/v{version:apiVersion}/invoices")]
+[Produces(MediaTypeNames.Application.Json)]
+public sealed class InvoicesController : ControllerBase
+{
+    private readonly ISender _sender;
+    private readonly DepositMatchingOrchestrator _orchestrator;
+
+    public InvoicesController(ISender sender, DepositMatchingOrchestrator orchestrator)
+    {
+        _sender = sender;
+        _orchestrator = orchestrator;
+    }
+
+    /// <summary>Create a new invoice.</summary>
+    [HttpPost]
+    [ProducesResponseType(typeof(InvoiceDto), StatusCodes.Status201Created)]
+    public async Task<IActionResult> Create([FromBody] CreateInvoiceHttpRequest req, CancellationToken ct)
+    {
+        // Convert optional ExpiresAtUtc to TTL
+        TimeSpan? ttl = null;
+        if (req.ExpiresAtUtc.HasValue)
+        {
+            var delta = req.ExpiresAtUtc.Value - DateTimeOffset.UtcNow;
+            if (delta > TimeSpan.Zero) ttl = delta;
+        }
+
+        var cmd = new CreateInvoiceCommand(
+            req.InvoiceNumber,
+            req.Currency,
+            req.Amount,
+            req.CustomerId,
+            ttl
+        );
+
+        var invoiceId = await _sender.Send(cmd, ct);
+        var dto = await _sender.Send(new GetInvoiceStatusQuery(invoiceId), ct);
+
+        return CreatedAtAction(
+            nameof(GetByNumber),
+            routeValues: new { version = "1.0", invoiceNumber = dto.InvoiceNumber },
+            value: dto
+        );
+    }
+
+    /// <summary>Get full invoice details by invoice number.</summary>
+    [HttpGet("{invoiceNumber}")]
+    [ProducesResponseType(typeof(InvoiceDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetByNumber([FromRoute] string invoiceNumber, CancellationToken ct)
+    {
+        try
+        {
+            var dto = await _sender.Send(new GetInvoiceDetailsQuery(invoiceNumber), ct);
+            return Ok(dto);
+        }
+        catch (KeyNotFoundException)
+        {
+            return NotFound();
+        }
+    }
+
+    /// <summary>Get current invoice status by Id.</summary>
+    [HttpGet("status/{id:guid}")]
+    [ProducesResponseType(typeof(InvoiceDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetStatus([FromRoute] Guid id, CancellationToken ct)
+    {
+        try
+        {
+            var dto = await _sender.Send(new GetInvoiceStatusQuery(id), ct);
+            return Ok(dto);
+        }
+        catch (KeyNotFoundException)
+        {
+            return NotFound();
+        }
+    }
+
+    // ===== Manual sync by invoiceNumber (ساده‌سازی؛ از SyncInvoiceAsync استفاده می‌کنیم) =====
+    [HttpPost("{invoiceNumber}/sync")]
+    [ProducesResponseType(typeof(ManualSyncHttpResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ManualSync([FromRoute] string invoiceNumber, [FromBody] ManualSyncHttpRequest req, CancellationToken ct)
+    {
+        try
+        {
+            var invoice = await _sender.Send(new GetInvoiceDetailsQuery(invoiceNumber), ct);
+
+            // یک‌جا کل اینوویس را سینک می‌کنیم
+            var applied = await _orchestrator.SyncInvoiceAsync(invoice.Id, ct);
+
+            // برای هم‌خوانی با Response قبلی، بقیه مقادیر را صفر می‌گذاریم
+            var polledWallets = (invoice.Addresses ?? Array.Empty<InvoiceAddressDto>())
+                                .Select(a => a.WalletId)
+                                .Distinct()
+                                .Count();
+
+            return Ok(new ManualSyncHttpResponse
+            {
+                InvoiceNumber = invoiceNumber,
+                PolledWallets = polledWallets,
+                TotalDepositsSeen = 0,
+                Matched = 0,
+                Applied = applied,
+                AlreadyApplied = 0,
+                Rejected = 0
+            });
+        }
+        catch (KeyNotFoundException)
+        {
+            return NotFound();
+        }
+    }
+
+    // ===== New endpoints =====
+
+    public sealed class GenerateAddressRequest
+    {
+        public string Currency { get; set; } = default!;
+        public string? Network { get; set; }
+    }
+
+    /// <summary>Generate/attach a deposit address for an invoice by Id.</summary>
+    [HttpPost("{id:guid}/address")]
+    [Consumes("application/json")]
+    [Produces("application/json")]
+    [ProducesResponseType(typeof(GeneratedAddressResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<GeneratedAddressResult>> GenerateAddress(
+        [FromRoute] Guid id,
+        [FromBody] GenerateAddressRequest req,
+        CancellationToken ct)
+    {
+        try
+        {
+            var result = await _sender.Send(
+                new GenerateAndAttachAddressToInvoiceCommand(id, req.Currency, req.Network),
+                ct);
+
+            return Ok(result); // 200 + JSON: address, network, walletId, currency, createdAt
+        }
+        catch (KeyNotFoundException)
+        {
+            return NotFound();
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    [HttpPost("{id:guid}/sync")]
+    [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+    public async Task<IActionResult> ManualSync([FromRoute] Guid id, CancellationToken ct)
+    {
+        var applied = await _orchestrator.SyncInvoiceAsync(id, ct);
+        return Ok(new { applied });
+    }
+    [HttpPost("{id:guid}/confirm-tx")]
+    [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> ConfirmByTxHash([FromRoute] Guid id, [FromBody] ConfirmTxRequest req, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req.TxHash))
+            return BadRequest(new { error = "txHash is required" });
+
+        var res = await _sender.Send(new ConfirmTxHashCommand(id, req.TxHash.Trim()), ct);
+
+        if (!res.FoundOnExchange)
+            return NotFound(new { error = "Transaction not found on exchange" });
+
+        return Ok(new
+        {
+            res.InvoiceId,
+            res.FoundOnExchange,
+            res.Matched,
+            res.Applied,
+            res.Reason
+        });
+    }
+    [HttpGet("{id:guid}/transactions")]
+    [ProducesResponseType(typeof(IReadOnlyList<InvoiceTransactionItem>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ListTransactions(
+        [FromRoute] Guid id,
+        [FromQuery, Range(1, 200)] int? limit,
+        [FromQuery] DateTimeOffset? sinceUtc,
+        [FromQuery] bool onlyInvoiceAddresses = true,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var list = await _sender.Send(
+                new GatewayService.AccountCharge.Application.Queries.GetInvoiceTransactions.GetInvoiceTransactionsQuery(
+                    InvoiceId: id,
+                    Limit: limit,
+                    SinceUtc: sinceUtc,
+                    OnlyInvoiceAddresses: onlyInvoiceAddresses
+                ), ct);
+
+            // Map to lightweight HTTP DTO
+            var http = list.Select(x => new InvoiceTransactionItem
+            {
+                TxHash = x.TxHash!,
+                Address = x.Address,
+                Network = x.Network,
+                Tag = x.Tag,
+                Amount = x.Amount,
+                Currency = x.Currency,
+                Confirmed = x.Confirmed,
+                Confirmations = x.Confirmations,
+                RequiredConfirmations = x.RequiredConfirmations,
+                CreatedAt = x.CreatedAt
+            }).ToList();
+
+            return Ok(http);
+        }
+        catch (KeyNotFoundException)
+        {
+            return NotFound();
+        }
+    }
+    // GET: /api/v1/invoices/{id}/transactions/all
+    [HttpGet("{id:guid}/transactions/all")]
+    [ProducesResponseType(typeof(IReadOnlyList<InvoiceTransactionItem>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ListAllTransactions([FromRoute] Guid id, CancellationToken ct = default)
+    {
+        try
+        {
+            var list = await _sender.Send(
+                new GatewayService.AccountCharge.Application.Queries.GetInvoiceTransactionsAll.GetInvoiceTransactionsAllQuery(id),
+                ct);
+
+            var http = list.Select(x => new InvoiceTransactionItem
+            {
+                TxHash = x.TxHash!,
+                Address = x.Address,
+                Network = x.Network,
+                Tag = x.Tag,
+                Amount = x.Amount,
+                Currency = x.Currency,
+                Confirmed = x.Confirmed,
+                Confirmations = x.Confirmations,
+                RequiredConfirmations = x.RequiredConfirmations,
+                CreatedAt = x.CreatedAt
+            }).ToList();
+
+            return Ok(http);
+        }
+        catch (KeyNotFoundException)
+        {
+            return NotFound();
+        }
+    }
+
+    public sealed class InvoiceTransactionItem
+    {
+        public string TxHash { get; set; } = default!;
+        public string Address { get; set; } = default!;
+        public string? Network { get; set; }
+        public string? Tag { get; set; }
+        public decimal Amount { get; set; }
+        public string Currency { get; set; } = default!;
+        public bool Confirmed { get; set; }
+        public int Confirmations { get; set; }
+        public int RequiredConfirmations { get; set; }
+        public DateTimeOffset CreatedAt { get; set; }
+    }
+
+    public sealed class ConfirmTxRequest
+    {
+        public string TxHash { get; set; } = default!;
+        public string Network { get; set; } = default!;
+    }
+    // -------------------------
+    // HTTP Request/Response DTOs scoped to API
+    // -------------------------
+
+    public sealed class CreateInvoiceHttpRequest
+    {
+        [Required] public string Currency { get; set; } = default!;
+        [Range(0, double.MaxValue)] public decimal Amount { get; set; }
+        public string? CustomerId { get; set; }
+        public string? InvoiceNumber { get; set; }
+        public DateTimeOffset? ExpiresAtUtc { get; set; }
+    }
+
+    public sealed class ManualSyncHttpRequest
+    {
+        [Range(1, 200)] public int? Limit { get; set; }           // فعلاً استفاده نمی‌کنیم
+        public DateTimeOffset? SinceUtc { get; set; }             // فعلاً استفاده نمی‌کنیم
+    }
+
+    public sealed class ManualSyncHttpResponse
+    {
+        public string InvoiceNumber { get; set; } = default!;
+        public int PolledWallets { get; set; }
+        public int TotalDepositsSeen { get; set; }
+        public int Matched { get; set; }
+        public int Applied { get; set; }
+        public int AlreadyApplied { get; set; }
+        public int Rejected { get; set; }
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Api\Models\InvoicesDtos.cs ===
+namespace GatewayService.AccountCharge.Api.Models;
+
+// Requests
+
+public sealed class CreateInvoiceRequest
+{
+    /// <summary>Total expected amount in crypto units (e.g., 0.5)</summary>
+    public decimal Amount { get; set; }
+
+    /// <summary>Currency code, e.g., "btc", "eth", "usdt"</summary>
+    public string Currency { get; set; } = "btc";
+
+    /// <summary>Optional expiration (UTC). If omitted, backend default applies.</summary>
+    public DateTime? ExpiresAtUtc { get; set; }
+
+    /// <summary>Optional note to store alongside invoice</summary>
+    public string? Note { get; set; }
+}
+
+public sealed class AttachAddressRequest
+{
+    /// <summary>Internal wallet id in Nobitex (from /v2/wallets or /users/wallets/list)</summary>
+    public int WalletId { get; set; }
+
+    /// <summary>Blockchain deposit address.</summary>
+    public string Address { get; set; } = default!;
+
+    /// <summary>Network code (e.g., "BTC", "TRX", "ETH", "BSC").</summary>
+    public string Network { get; set; } = "BTC";
+
+    /// <summary>Optional tag/memo (for XRP, XLM, etc.).</summary>
+    public string? Tag { get; set; }
+}
+
+public sealed class ManualSyncRequest
+{
+    /// <summary>Override page size for polling recent deposits (default 30)</summary>
+    public int? Limit { get; set; }
+
+    /// <summary>Optional lower-bound filter for deposit created_at</summary>
+    public DateTime? SinceUtc { get; set; }
+}
+
+// Responses
+
+public sealed class CreateInvoiceResponse
+{
+    public Guid Id { get; set; }
+    public string InvoiceNumber { get; set; } = default!;
+    public decimal Amount { get; set; }
+    public string Currency { get; set; } = default!;
+    public DateTime CreatedAtUtc { get; set; }
+    public DateTime? ExpiresAtUtc { get; set; }
+    public string Status { get; set; } = default!;
+}
+
+public sealed class InvoiceDetailsResponse
+{
+    public string InvoiceNumber { get; set; } = default!;
+    public string Status { get; set; } = default!;
+    public decimal ExpectedAmount { get; set; }
+    public string ExpectedCurrency { get; set; } = default!;
+    public decimal TotalPaid { get; set; }
+    public DateTime CreatedAtUtc { get; set; }
+    public DateTime? ExpiresAtUtc { get; set; }
+
+    public List<AddressDto> Addresses { get; set; } = new();
+    public List<PaymentDto> Payments { get; set; } = new();
+
+    public sealed class AddressDto
+    {
+        public int WalletId { get; set; }
+        public string Currency { get; set; } = default!;
+        public string Address { get; set; } = default!;
+        public string Network { get; set; } = default!;
+        public string? Tag { get; set; }
+        public DateTime CreatedAtUtc { get; set; }
+    }
+
+    public sealed class PaymentDto
+    {
+        public string TxHash { get; set; } = default!;
+        public string Address { get; set; } = default!;
+        public string Network { get; set; } = default!;
+        public string? Tag { get; set; }
+        public decimal Amount { get; set; }
+        public string Currency { get; set; } = default!;
+        public bool Confirmed { get; set; }
+        public int Confirmations { get; set; }
+        public int RequiredConfirmations { get; set; }
+        public DateTime CreatedAtUtc { get; set; }
+    }
+}
+
+public sealed class ManualSyncResponse
+{
+    public string InvoiceNumber { get; set; } = default!;
+    public int PolledWallets { get; set; }
+    public int TotalDepositsSeen { get; set; }
+    public int Matched { get; set; }
+    public int Applied { get; set; }
+    public int AlreadyApplied { get; set; }
+    public int Rejected { get; set; }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Api\Program.cs ===
+using Asp.Versioning;
+using Asp.Versioning.ApiExplorer;
+using GatewayService.AccountCharge.Application;
+using GatewayService.AccountCharge.Infrastructure;
+using Microsoft.AspNetCore.Mvc;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// ===================== Config: Nobitex options + env fallback =====================
+// Read Nobitex config + fall back to env for Token
+var nobitexSection = builder.Configuration.GetSection(GatewayService.AccountCharge.Infrastructure.Options.NobitexOptionsConfig.SectionName);
+builder.Services.Configure<GatewayService.AccountCharge.Infrastructure.Options.NobitexOptionsConfig>(nobitexSection);
+
+// If Token missing in appsettings, pull from env
+var tokenFromEnv = Environment.GetEnvironmentVariable("NOBITEX_API_TOKEN");
+if (string.IsNullOrWhiteSpace(nobitexSection["Token"]) && !string.IsNullOrWhiteSpace(tokenFromEnv))
+{
+    builder.Configuration["Nobitex:Token"] = tokenFromEnv;
+}
+
+// ===================== Services =====================
+builder.Services.AddApplication();
+builder.Services.AddInfrastructure(builder.Configuration);
+
+// Controllers & JSON
+builder.Services
+    .AddControllers()
+    .AddJsonOptions(o =>
+    {
+        o.JsonSerializerOptions.PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase;
+        o.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
+    });
+
+// Swagger (base)
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+// API Versioning (Asp.Versioning)
+builder.Services.AddApiVersioning(options =>
+{
+    options.DefaultApiVersion = new ApiVersion(1, 0);
+    options.AssumeDefaultVersionWhenUnspecified = true;
+    options.ReportApiVersions = true;
+
+    // Version readers
+    options.ApiVersionReader = ApiVersionReader.Combine(
+        new UrlSegmentApiVersionReader(),
+        new QueryStringApiVersionReader("api-version"),
+        new HeaderApiVersionReader("X-Api-Version"));
+})
+.AddApiExplorer(options =>
+{
+    options.GroupNameFormat = "'v'VVV";       // v1, v1.1, ...
+    options.SubstituteApiVersionInUrl = true; // replace {version} in route
+});
+
+builder.Services.AddCors(opt =>
+{
+    opt.AddPolicy("InnerNetwork", b =>
+        b.WithOrigins(
+            "http://172.31.18.2:3000",    // Frontend dev
+            "http://localhost:3000")      // Optional local fallback
+         .AllowAnyHeader()
+         .AllowAnyMethod());
+});
+
+var app = builder.Build();
+
+// ===================== Middleware =====================
+
+// CORS
+app.UseCors("AllowAll");
+
+// Minimal ProblemDetails for unhandled errors
+app.UseExceptionHandler(a =>
+{
+    a.Run(async ctx =>
+    {
+        ctx.Response.ContentType = "application/problem+json";
+        var problem = new ProblemDetails
+        {
+            Status = StatusCodes.Status500InternalServerError,
+            Title = "Unexpected error",
+            Detail = "Something went wrong. Check logs for correlation."
+        };
+        await ctx.Response.WriteAsJsonAsync(problem);
+    });
+});
+
+// Only redirect to HTTPS when not explicitly disabled AND environment is Production
+var disableHttpsRedirect = builder.Configuration.GetValue<bool>("DisableHttpsRedirection");
+if (!disableHttpsRedirect && app.Environment.IsProduction())
+{
+    app.UseHttpsRedirection();
+}
+
+// Swagger (only in Development here; adjust if you want it in Prod)
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+
+    // Versioned Swagger endpoints
+    var provider = app.Services.GetRequiredService<IApiVersionDescriptionProvider>();
+    app.UseSwaggerUI(options =>
+    {
+        foreach (var desc in provider.ApiVersionDescriptions)
+        {
+            options.SwaggerEndpoint($"/swagger/{desc.GroupName}/swagger.json", desc.GroupName.ToUpperInvariant());
+        }
+    });
+}
+
+// Routing & endpoints
+app.MapControllers();
+
+app.Run();
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Abstractions\IAccountingClient.cs ===
+// D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Abstractions\IAccountingClient.cs
+using System;
+
+namespace GatewayService.AccountCharge.Application.Abstractions;
+
+public interface IAccountingClient
+{
+    /// <summary>Send a Deposit invoice to Accounting (tag = 1).</summary>
+    Task CreateDepositAsync(
+        Guid externalCustomerId,
+        decimal amount,
+        string currency,
+        DateTimeOffset occurredAt,
+        string? idempotencyKey,
+        CancellationToken ct);
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Abstractions\IInvoiceNumberGenerator.cs ===
+namespace GatewayService.AccountCharge.Application.Abstractions;
+
+/// <summary>
+/// Generates unique, user-facing invoice numbers.
+/// </summary>
+public interface IInvoiceNumberGenerator
+{
+    string Next();
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Abstractions\INobitexClient.cs ===
+using GatewayService.AccountCharge.Application.DTOs;
+
+namespace GatewayService.AccountCharge.Application.Abstractions;
+
+public interface INobitexClient
+{
+    Task<IReadOnlyList<WalletDto>> GetWalletsAsync(CancellationToken ct);
+
+    // Preferred: currency required, network optional
+    Task<GeneratedAddressDto> GenerateAddressAsync(string currency, string? network, CancellationToken ct);
+
+    // walletId is INT (Nobitex returns numeric id)
+    Task<IReadOnlyList<IncomingDepositDto>> GetRecentDepositsAsync(int walletId, int limit, DateTimeOffset? since, CancellationToken ct);
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Abstractions\IPaymentMatchingOptionsProvider.cs ===
+using GatewayService.AccountCharge.Domain.Invoices;
+
+namespace GatewayService.AccountCharge.Application.Abstractions;
+
+
+/// <summary>
+/// Provides matching options (confirmations/tolerance) per currency/network or globally.
+/// </summary>
+public interface IPaymentMatchingOptionsProvider
+{
+    PaymentMatchingOptions Get(string currency, string network);
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Abstractions\IUnitOfWork.cs ===
+namespace GatewayService.AccountCharge.Application.Abstractions;
+
+public interface IUnitOfWork
+{
+    // Commit changes in a single atomic transaction.
+    Task<int> SaveChangesAsync(CancellationToken ct = default);
+    void ClearChangeTracker();       
+
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Behaviors\TransactionBehavior.cs ===
+using GatewayService.AccountCharge.Application.Abstractions;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Behaviors;
+
+/// <summary>
+/// Wraps command handlers in a transaction boundary (if infra supports).
+/// If your UoW is DbContext-based, ensure SaveChanges in handlers;
+/// this behavior can be extended to begin/commit/rollback if needed.
+/// </summary>
+public sealed class TransactionBehavior<TRequest, TResponse> : IPipelineBehavior<TRequest, TResponse>
+{
+    private readonly IUnitOfWork _uow;
+
+    public TransactionBehavior(IUnitOfWork uow) => _uow = uow;
+
+    public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken ct)
+    {
+        // For simplicity, just call next. If you want to enforce SaveChanges here, 
+        // you can check type of request and call _uow.SaveChangesAsync after next().
+        var response = await next();
+        return response;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Behaviors\ValidationBehavior.cs ===
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace GatewayService.AccountCharge.Application.Behaviors
+{
+    internal class ValidationBehavior
+    {
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\ApplyDeposit\ApplyDepositCommand.cs ===
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
+
+public sealed record ApplyDepositToInvoiceCommand(
+    Guid InvoiceId,
+    string TxHash,
+    string Address,
+    string? Network,
+    string? Tag,
+    decimal Amount,
+    string Currency,
+    bool Confirmed,
+    int Confirmations,
+    int RequiredConfirmations,
+    DateTimeOffset CreatedAt
+) : IRequest<ApplyDepositResult>;
+/// <summary>Result of applying a deposit to an invoice.</summary>
+public sealed record ApplyDepositResult(
+    bool Matched,
+    bool Applied,
+    string Reason,
+    Guid? InvoiceId
+);
+
+public sealed class DepositForInvoiceDto
+{
+    public Guid InvoiceId { get; init; }   // 💡 اضافه شده
+    public string TxHash { get; init; } = default!;
+    public string Address { get; init; } = default!;
+    public string? Network { get; init; }
+    public string? Tag { get; init; }
+    public decimal Amount { get; init; }
+    public string Currency { get; init; } = default!;
+    public bool Confirmed { get; init; }
+    public int Confirmations { get; init; }
+    public int RequiredConfirmations { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\ApplyDeposit\ApplyDepositHandler.cs ===
+// D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\ApplyDeposit\ApplyDepositToInvoiceHandler.cs
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
+using GatewayService.AccountCharge.Domain.Invoices;
+using GatewayService.AccountCharge.Domain.Repositories;
+using GatewayService.AccountCharge.Domain.ValueObjects;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+// ...existing usings
+
+public sealed class ApplyDepositToInvoiceHandler
+    : IRequestHandler<ApplyDepositToInvoiceCommand, ApplyDepositResult>
+{
+    private readonly IInvoiceRepository _repo;
+    private readonly IUnitOfWork _uow;
+    private readonly IPaymentMatchingOptionsProvider _optsProvider;
+    private readonly IAccountingClient _accounting;                     // <-- ADD
+    private readonly ILogger<ApplyDepositToInvoiceHandler> _logger;     // <-- ADD
+
+    public ApplyDepositToInvoiceHandler(
+        IInvoiceRepository repo,
+        IUnitOfWork uow,
+        IPaymentMatchingOptionsProvider optsProvider,
+        IAccountingClient accounting,                                    // <-- ADD
+        ILogger<ApplyDepositToInvoiceHandler> logger)                    // <-- ADD
+    {
+        _repo = repo;
+        _uow = uow;
+        _optsProvider = optsProvider;
+        _accounting = accounting;                                        // <-- ADD
+        _logger = logger;                                                // <-- ADD
+    }
+
+    public async Task<ApplyDepositResult> Handle(ApplyDepositToInvoiceCommand request, CancellationToken ct)
+    {
+        _uow.ClearChangeTracker();
+
+        var invoice = await _repo.GetByIdAsync(request.InvoiceId, ct);
+        if (invoice is null)
+            return new ApplyDepositResult(false, false, "Invoice not found", null);
+
+        var txHash = new TransactionHash(request.TxHash);
+
+        if (await _repo.HasAnyAppliedDepositAsync(txHash.Value, ct))
+            return new ApplyDepositResult(true, false, "Already applied (global)", invoice.Id);
+
+        if (await _repo.HasAppliedDepositAsync(invoice.Id, txHash.Value, ct))
+            return new ApplyDepositResult(true, false, "Already applied", invoice.Id);
+
+        var incoming = new IncomingDeposit(
+            txHash,
+            new ChainAddress(request.Address, request.Network, request.Tag),
+            new Money(request.Amount, request.Currency),
+            request.Confirmed,
+            request.Confirmations,
+            request.RequiredConfirmations,
+            request.CreatedAt
+        );
+
+        var opts = _optsProvider.Get(request.Currency, request.Network);
+
+        var ok = invoice.TryApplyDeposit(incoming, opts, out var reason);
+        if (!ok)
+            return new ApplyDepositResult(true, false, reason, invoice.Id);
+
+        try
+        {
+            await _repo.UpdateAsync(invoice, ct);
+            await _uow.SaveChangesAsync(ct); // ✅ committed
+
+            // ---- CALL ACCOUNTING (fire-and-forget semantics) ----
+            try
+            {
+                // Try to extract ExternalCustomerId from invoice.CustomerId (Guid or string Guid)
+                Guid externalCustomerId;
+
+                var prop = invoice.GetType().GetProperty("CustomerId");
+                var raw = prop?.GetValue(invoice);
+
+                if (raw is Guid gid)
+                {
+                    externalCustomerId = gid;
+                }
+                else if (raw is string s && Guid.TryParse(s, out var g2))
+                {
+                    externalCustomerId = g2;
+                }
+                else
+                {
+                    throw new InvalidOperationException("Invoice.CustomerId must be a Guid (or Guid string).");
+                }
+
+                await _accounting.CreateDepositAsync(
+                    externalCustomerId: externalCustomerId,
+                    amount: request.Amount,
+                    currency: request.Currency.ToUpperInvariant(),
+                    occurredAt: request.CreatedAt,
+                    idempotencyKey: request.TxHash,     // helps prevent duplicates if you add support serverside
+                    ct: ct
+                );
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Accounting post failed for Invoice {InvoiceId} / Tx {TxHash}. " +
+                    "Invoice already updated — please retry out-of-band.",
+                    invoice.Id, request.TxHash);
+                // Intentionally swallow: invoice state is authoritative here.
+            }
+            // ------------------------------------------------------
+
+            return new ApplyDepositResult(true, true, reason, invoice.Id);
+        }
+        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+        {
+            return new ApplyDepositResult(true, false, "Already applied (db-unique)", invoice.Id);
+        }
+    }
+
+    private static bool IsUniqueViolation(DbUpdateException ex)
+    {
+        var msg = (ex.InnerException?.Message ?? ex.Message) ?? string.Empty;
+        return msg.IndexOf("UNIQUE", StringComparison.OrdinalIgnoreCase) >= 0
+            || msg.IndexOf("duplicate", StringComparison.OrdinalIgnoreCase) >= 0
+            || msg.IndexOf("IX_InvoiceAppliedDeposits_TxHash", StringComparison.OrdinalIgnoreCase) >= 0
+            || msg.IndexOf("UQ__InvoiceAppliedDeposits__TxHash", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\ApplyDepositsBatch\ApplyDepositsBatchCommand.cs ===
+using GatewayService.AccountCharge.Application.DTOs;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
+
+public sealed record ApplyDepositsBatchCommand(
+    IReadOnlyList<DepositForInvoiceDto> Deposits
+) : IRequest<ApplyDepositsBatchResult>;
+
+public sealed record ApplyDepositsBatchResult(
+    int Total,
+    int Matched,
+    int Applied,
+    int AlreadyApplied,
+    int Rejected
+);
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\ApplyDepositsBatch\ApplyDepositsBatchHandler.cs ===
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
+
+public sealed class ApplyDepositsBatchHandler
+    : IRequestHandler<ApplyDepositsBatchCommand, ApplyDepositsBatchResult>
+{
+    private readonly IMediator _mediator;
+
+    public ApplyDepositsBatchHandler(IMediator mediator) => _mediator = mediator;
+
+    public async Task<ApplyDepositsBatchResult> Handle(ApplyDepositsBatchCommand request, CancellationToken ct)
+    {
+        int matched = 0, applied = 0, already = 0, rejected = 0;
+
+        foreach (var d in request.Deposits)
+        {
+            var res = await _mediator.Send(new ApplyDepositToInvoiceCommand(
+                InvoiceId: d.InvoiceId,   // ✅ الان داریم
+                TxHash: d.TxHash,
+                Address: d.Address,
+                Network: d.Network,
+                Tag: d.Tag,
+                Amount: d.Amount,
+                Currency: d.Currency,
+                Confirmed: d.Confirmed,
+                Confirmations: d.Confirmations,
+                RequiredConfirmations: d.RequiredConfirmations,
+                CreatedAt: d.CreatedAt
+            ), ct);
+
+            if (!res.Matched) { rejected++; continue; }
+
+            matched++;
+            if (res.Applied) applied++;
+            else if (string.Equals(res.Reason, "Already applied", StringComparison.OrdinalIgnoreCase)) already++;
+            else rejected++;
+        }
+
+        return new ApplyDepositsBatchResult(
+            Total: request.Deposits.Count,
+            Matched: matched,
+            Applied: applied,
+            AlreadyApplied: already,
+            Rejected: rejected
+        );
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\AttachAddress\AttachAddressToInvoiceCommand.cs ===
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.AttachAddress;
+
+public sealed record AttachAddressToInvoiceCommand(
+    Guid InvoiceId,
+    string Address,
+    string Network,
+    string? Tag,
+    int WalletId,
+    string Currency
+) : IRequest<bool>; // true if attached or already present
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\AttachAddress\AttachAddressToInvoiceHandler.cs ===
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Domain.Repositories;
+using GatewayService.AccountCharge.Domain.ValueObjects;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.AttachAddress;
+
+public sealed class AttachAddressToInvoiceHandler : IRequestHandler<AttachAddressToInvoiceCommand, bool>
+{
+    private readonly IInvoiceRepository _repo;
+    private readonly IUnitOfWork _uow;
+
+    public AttachAddressToInvoiceHandler(IInvoiceRepository repo, IUnitOfWork uow)
+    {
+        _repo = repo;
+        _uow = uow;
+    }
+
+    public async Task<bool> Handle(AttachAddressToInvoiceCommand request, CancellationToken ct)
+    {
+        var invoice = await _repo.GetByIdAsync(request.InvoiceId, ct);
+        if (invoice is null) return false;
+
+        var chainAddress = new ChainAddress(request.Address, request.Network, request.Tag);
+        var walletRef = new WalletRef(request.WalletId, request.Currency);
+
+        invoice.AddAddress(chainAddress, walletRef);
+
+        await _repo.UpdateAsync(invoice, ct);
+        await _uow.SaveChangesAsync(ct);
+
+        return true;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\ConfirmTxHash\ConfirmTxHashCommand.cs ===
+// Application/Commands/ConfirmTxHash/ConfirmTxHashCommand.cs
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.ConfirmTxHash;
+
+public sealed record ConfirmTxHashCommand(Guid InvoiceId, string TxHash)
+    : IRequest<ConfirmTxHashResult>;
+
+public sealed record ConfirmTxHashResult(
+    Guid? InvoiceId,
+    bool FoundOnExchange,   
+    bool Matched,         
+    bool Applied,          
+    string? Reason         
+);
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\ConfirmTxHash\ConfirmTxHashHandler.cs ===
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Application.DTOs;
+using GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
+using GatewayService.AccountCharge.Domain.Repositories;
+using GatewayService.AccountCharge.Domain.ValueObjects;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.ConfirmTxHash;
+
+public sealed class ConfirmTxHashHandler
+    : IRequestHandler<ConfirmTxHashCommand, ConfirmTxHashResult>
+{
+    private readonly IInvoiceRepository _repo;
+    private readonly INobitexClient _nobitex;
+    private readonly IMediator _mediator;
+
+    private const int FetchLimitPerWallet = 200;
+    private static readonly TimeSpan Lookback = TimeSpan.FromDays(7);
+
+    public ConfirmTxHashHandler(IInvoiceRepository repo, INobitexClient nobitex, IMediator mediator)
+    {
+        _repo = repo;
+        _nobitex = nobitex;
+        _mediator = mediator;
+    }
+
+    public async Task<ConfirmTxHashResult> Handle(ConfirmTxHashCommand request, CancellationToken ct)
+    {
+        var invoice = await _repo.GetByIdAsync(request.InvoiceId, ct)
+            ?? throw new KeyNotFoundException("Invoice not found.");
+
+        var txHashStr = request.TxHash?.Trim();
+        if (string.IsNullOrWhiteSpace(txHashStr))
+            return new ConfirmTxHashResult(invoice.Id, false, false, false, "Empty txHash");
+
+        // Global guard: already applied anywhere?
+        if (await _repo.HasAnyAppliedDepositAsync(txHashStr, ct))
+            return new ConfirmTxHashResult(invoice.Id, true, false, false, "Already applied (global)");
+
+        var walletIds = invoice.Addresses.Select(a => a.WalletId).Distinct().ToArray();
+        if (walletIds.Length == 0)
+            return new ConfirmTxHashResult(invoice.Id, false, false, false, "Invoice has no wallet/addresses");
+
+        var since = DateTimeOffset.UtcNow - Lookback;
+
+        IncomingDepositDto? found = null;
+        foreach (var wid in walletIds)
+        {
+            var deposits = await _nobitex.GetRecentDepositsAsync(wid, FetchLimitPerWallet, since, ct);
+            found = deposits.FirstOrDefault(d =>
+                string.Equals(d.TxHash?.Trim(), txHashStr, StringComparison.OrdinalIgnoreCase));
+            if (found is not null) break;
+        }
+
+        if (found is null)
+            return new ConfirmTxHashResult(invoice.Id, false, false, false, "Not found");
+
+        var apply = await _mediator.Send(new ApplyDepositToInvoiceCommand(
+            InvoiceId: invoice.Id,
+            TxHash: found.TxHash!,
+            Address: found.Address,
+            Network: found.Network,
+            Tag: found.Tag,
+            Amount: found.Amount,
+            Currency: found.Currency,
+            Confirmed: found.Confirmed,
+            Confirmations: found.Confirmations,
+            RequiredConfirmations: found.RequiredConfirmations,
+            CreatedAt: found.CreatedAt
+        ), ct);
+
+        return new ConfirmTxHashResult(invoice.Id, true, apply.Matched, apply.Applied, apply.Reason);
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\CreateInvoice\CreateInvoiceCommand.cs ===
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.CreateInvoice;
+
+public sealed record CreateInvoiceCommand(
+    string? InvoiceNumber,     // if null, generate
+    string Currency,
+    decimal Amount,
+    string? CustomerId,
+    TimeSpan? Ttl
+) : IRequest<Guid>; // returns InvoiceId
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\CreateInvoice\CreateInvoiceHandler.cs ===
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Domain.Invoices;
+using GatewayService.AccountCharge.Domain.Repositories;
+using GatewayService.AccountCharge.Domain.ValueObjects;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.CreateInvoice;
+
+public sealed class CreateInvoiceHandler : IRequestHandler<CreateInvoiceCommand, Guid>
+{
+    private readonly IInvoiceRepository _repo;
+    private readonly IUnitOfWork _uow;
+    private readonly IInvoiceNumberGenerator _numberGen;
+
+    public CreateInvoiceHandler(IInvoiceRepository repo, IUnitOfWork uow, IInvoiceNumberGenerator numberGen)
+    {
+        _repo = repo;
+        _uow = uow;
+        _numberGen = numberGen;
+    }
+
+    public async Task<Guid> Handle(CreateInvoiceCommand request, CancellationToken ct)
+    {
+        var number = string.IsNullOrWhiteSpace(request.InvoiceNumber)
+            ? _numberGen.Next()
+            : request.InvoiceNumber!.Trim();
+
+        var expected = new Money(request.Amount, request.Currency);
+        var invoice = Invoice.Create(number, expected, request.CustomerId, request.Ttl);
+
+        await _repo.AddAsync(invoice, ct);
+        await _uow.SaveChangesAsync(ct);
+
+        return invoice.Id;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\GenerateAndAttachAddress\GenerateAndAttachAddressToInvoiceCommand.cs ===
+using GatewayService.AccountCharge.Application.DTOs;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.GenerateAndAttachAddress;
+
+public sealed class GenerateAndAttachAddressToInvoiceCommand : IRequest<GeneratedAddressResult>
+{
+    public Guid InvoiceId { get; }
+    public string Currency { get; }
+    public string? Network { get; }
+
+    public GenerateAndAttachAddressToInvoiceCommand(Guid invoiceId, string currency, string? network)
+    {
+        InvoiceId = invoiceId;
+        Currency = currency;
+        Network = network;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\GenerateAndAttachAddress\GenerateAndAttachAddressToInvoiceHandler.cs ===
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Application.DTOs;
+using GatewayService.AccountCharge.Domain.Repositories;
+using GatewayService.AccountCharge.Domain.ValueObjects;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.GenerateAndAttachAddress;
+
+public sealed class GenerateAndAttachAddressToInvoiceHandler
+    : IRequestHandler<GenerateAndAttachAddressToInvoiceCommand, GeneratedAddressResult>
+{
+    private readonly INobitexClient _nobitex;
+    private readonly IInvoiceRepository _repo;
+    private readonly IUnitOfWork _uow;
+
+    public GenerateAndAttachAddressToInvoiceHandler(
+        INobitexClient nobitex,
+        IInvoiceRepository repo,
+        IUnitOfWork uow)
+    {
+        _nobitex = nobitex;
+        _repo = repo;
+        _uow = uow;
+    }
+
+    public async Task<GeneratedAddressResult> Handle(GenerateAndAttachAddressToInvoiceCommand request, CancellationToken ct)
+    {
+        // 1) Load invoice (tracked)
+        var invoice = await _repo.GetByIdAsync(request.InvoiceId, ct);
+        if (invoice is null)
+            throw new KeyNotFoundException("Invoice not found.");
+
+        // 2) Upstream (Nobitex)
+        var gen = await _nobitex.GenerateAddressAsync(request.Currency, request.Network, ct);
+
+        // 3) Normalize
+        static string? T(string? s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+
+        var address = T(gen.Address);
+        var tag = T(gen.Tag);
+        var network = T(gen.Network) ?? T(request.Network);
+        var currency = T(gen.Currency) ?? T(request.Currency);
+
+        if (string.IsNullOrWhiteSpace(address))
+            throw new InvalidOperationException("Nobitex did not return a deposit address.");
+        if (string.IsNullOrWhiteSpace(network))
+            throw new ArgumentException("Network is required.");
+        if (string.IsNullOrWhiteSpace(currency))
+            throw new ArgumentException("Currency is required.");
+
+        // 4) Wallet id
+        var walletId = gen.WalletId > 0
+            ? gen.WalletId
+            : await ResolveWalletIdByCurrencyAsync(_nobitex, currency!, ct);
+
+        // 5) Map & attach
+        var chainAddress = new ChainAddress(address!, network!, tag);
+        var walletRef = new WalletRef(walletId, currency!);
+        var now = (gen.CreatedAt == default) ? DateTimeOffset.UtcNow : gen.CreatedAt;
+
+        invoice.AddAddress(chainAddress, walletRef, now);
+
+        // 6) Persist
+        await _uow.SaveChangesAsync(ct);
+
+        // 7) Return DTO
+        return new GeneratedAddressResult(
+            Address: address!,
+            Tag: tag,
+            Network: network!,
+            WalletId: walletId,
+            Currency: currency!,
+            CreatedAt: now
+        );
+    }
+
+    private static async Task<int> ResolveWalletIdByCurrencyAsync(INobitexClient nobitex, string currency, CancellationToken ct)
+    {
+        var wallets = await nobitex.GetWalletsAsync(ct);
+        var w = wallets.FirstOrDefault(x => string.Equals(x.Currency, currency, StringComparison.OrdinalIgnoreCase));
+        if (w is null || w.Id <= 0)
+            throw new InvalidOperationException($"No wallet found for currency '{currency}'.");
+        return w.Id;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Common\AssetMapper.cs ===
+// Application/Common/AssetMapper.cs
+using System;
+
+namespace GatewayService.AccountCharge.Application.Common;
+
+public static class AssetMapper
+{
+    /// <summary>
+    /// Normalizes any provider currency label/symbol to our canonical symbol (upper-case).
+    /// Examples: "bnb" or "BinanceCoin" -> "BNB", "tether" -> "USDT".
+    /// </summary>
+    public static string NormalizeCurrency(string code)
+    {
+        if (string.IsNullOrWhiteSpace(code))
+            throw new ArgumentException("Currency code required");
+
+        return code.Trim().ToUpperInvariant() switch
+        {
+            // Common provider names -> symbols
+            "BINANCECOIN" => "BNB",
+            "TETHER" => "USDT",
+            "BITCOIN" => "BTC",
+            "ETHEREUM" => "ETH",
+
+            // already symbols
+            "BNB" => "BNB",
+            "USDT" => "USDT",
+            "BTC" => "BTC",
+            "ETH" => "ETH",
+            "TRX" => "TRX",
+
+            // default: just upper-case it
+            var other => other
+        };
+    }
+
+    /// <summary>
+    /// Prefer symbol when available; otherwise, normalize the full name.
+    /// </summary>
+    public static string NormalizeCurrencyFromProvider(string? symbol, string? name)
+    {
+        if (!string.IsNullOrWhiteSpace(symbol))
+            return NormalizeCurrency(symbol);
+        if (!string.IsNullOrWhiteSpace(name))
+            return NormalizeCurrency(name);
+        throw new ArgumentException("Provider currency symbol/name is missing.");
+    }
+
+    /// <summary>
+    /// Canonical network labels aligned with Domain (ChainAddress.NormalizeNetwork):
+    /// "BEP20"/"BEP-20"/"BSC" -> "BSC"; "TRC20"/"TRON" -> "TRC20"; "ERC20"/"ETHEREUM"/"ETH" -> "ERC20".
+    /// Returns null when unknown/omitted.
+    /// </summary>
+    public static string? NormalizeNetwork(string? net)
+    {
+        if (string.IsNullOrWhiteSpace(net)) return null;
+        return net.Trim().ToUpperInvariant() switch
+        {
+            "BEP20" or "BEP-20" or "BSC" => "BSC",
+            "TRC20" or "TRON" => "TRC20",
+            "ERC20" or "ETHEREUM" or "ETH" => "ERC20",
+            var other => other
+        };
+    }
+
+    /// <summary>
+    /// Best-effort inference from blockchain explorer URLs.
+    /// </summary>
+    public static string? InferNetworkFromUrl(string? url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return null;
+        var u = url.ToLowerInvariant();
+        if (u.Contains("bscscan")) return "BSC";
+        if (u.Contains("tronscan")) return "TRC20";
+        if (u.Contains("etherscan")) return "ERC20";
+        if (u.Contains("polygonscan")) return "POLYGON"; // domain may remap or ignore
+        return null;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\DTOs\GeneratedAddressDto.cs ===
+namespace GatewayService.AccountCharge.Application.DTOs;
+
+public sealed class GeneratedAddressDto
+{
+    public int WalletId { get; init; }             // 0 if missing
+    public required string Currency { get; init; } // lowercase
+    public string? Network { get; init; }          // e.g., TRX/BSC/ERC20/BTC
+    public required string Address { get; init; }
+    public string? Tag { get; init; }              // memo/destinationTag/tag
+    public DateTimeOffset CreatedAt { get; init; }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\DTOs\GeneratedAddressResultDto.cs ===
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace GatewayService.AccountCharge.Application.DTOs;
+
+    public sealed record GeneratedAddressResult(
+     string Address,
+     string? Tag,
+     string Network,
+     int WalletId,
+     string Currency,
+     DateTimeOffset CreatedAt
+ );
+
+
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\DTOs\IncomingDepositDto.cs ===
+namespace GatewayService.AccountCharge.Application.DTOs;
+
+/// <summary>
+/// Transport shape for a raw deposit observed via Nobitex client.
+/// </summary>
+public sealed class IncomingDepositDto
+{
+    public required string TxHash { get; init; }
+    public required string Address { get; init; }
+    public string? Tag { get; init; }                  // memo/destinationTag/tag
+    public required string Network { get; init; }
+    public required decimal Amount { get; init; }
+    public required string Currency { get; init; }     // lowercase
+    public required int Confirmations { get; init; }
+    public required int RequiredConfirmations { get; init; }
+    public required DateTimeOffset CreatedAt { get; init; }
+    public int WalletId { get; init; }
+    public bool Confirmed { get; init; }
+
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\DTOs\InvoiceAddressDto.cs ===
+namespace GatewayService.AccountCharge.Application.DTOs;
+
+
+public sealed class InvoiceAddressDto
+{
+    public required string Address { get; init; }
+    public string? Tag { get; init; }
+    public required string Network { get; init; }
+    public required int WalletId { get; init; }
+    public required string Currency { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\DTOs\InvoiceDto.cs ===
+using GatewayService.AccountCharge.Application.DTOs;
+using GatewayService.AccountCharge.Domain.Enums;
+
+namespace GatewayService.AccountCharge.Application.DTOs;
+
+public sealed class InvoiceDto
+{
+    public required Guid Id { get; init; }
+    public required string InvoiceNumber { get; init; }
+    public required string Currency { get; init; }
+    public required decimal ExpectedAmount { get; init; }
+    public required decimal TotalPaid { get; init; }
+    public required InvoiceStatus Status { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset? ExpiresAt { get; init; }
+    public IReadOnlyCollection<InvoiceAddressDto> Addresses { get; init; } = Array.Empty<InvoiceAddressDto>();
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\DTOs\WalletDto.cs ===
+namespace GatewayService.AccountCharge.Application.DTOs;
+
+// Simplified view of a deposit-capable wallet (currency + optionally network + id)
+public sealed class WalletDto
+{
+    public int Id { get; init; }
+    public required string Currency { get; init; } // lowercase
+    public string? Network { get; init; }
+    public bool HasDepositAddress { get; init; }
+    public string? DepositAddress { get; init; }   // NEW (helpful for fallback)
+    public string? DepositTag { get; init; }       // NEW
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Queries\GetInvoiceDetails\GetInvoiceDetailsHandler.cs ===
+using System;
+using System.Linq;
+using GatewayService.AccountCharge.Application.DTOs;
+using GatewayService.AccountCharge.Domain.Repositories;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceDetails;
+
+public sealed class GetInvoiceDetailsHandler : IRequestHandler<GetInvoiceDetailsQuery, InvoiceDto>
+{
+    private readonly IInvoiceRepository _repo;
+
+    public GetInvoiceDetailsHandler(IInvoiceRepository repo) => _repo = repo;
+
+    public async Task<InvoiceDto> Handle(GetInvoiceDetailsQuery request, CancellationToken ct)
+    {
+        var invoice = await _repo.GetByNumberAsync(request.InvoiceNumber.Trim(), ct)
+            ?? throw new KeyNotFoundException("Invoice not found");
+
+        return new InvoiceDto
+        {
+            Id = invoice.Id,
+            InvoiceNumber = invoice.InvoiceNumber,
+            Currency = invoice.ExpectedAmount.Currency,
+            ExpectedAmount = invoice.ExpectedAmount.Amount,
+            TotalPaid = invoice.TotalPaid,
+            Status = invoice.Status,
+
+            // invoice.CreatedAt/ExpiresAt در دامین هنوز DateTime هستند → به Offset تبدیل‌شان می‌کنیم
+            CreatedAt = new DateTimeOffset(invoice.CreatedAt, TimeSpan.Zero),
+            ExpiresAt = invoice.ExpiresAt.HasValue
+                ? new DateTimeOffset(invoice.ExpiresAt.Value, TimeSpan.Zero)
+                : (DateTimeOffset?)null,
+
+            Addresses = invoice.Addresses.Select(a => new InvoiceAddressDto
+            {
+                Address = a.Address,        // string
+                Tag = a.Tag,            // string?
+                Network = a.Network,        // string?
+                WalletId = a.WalletId,      // int
+                Currency = a.Currency,      // string
+                CreatedAt = a.CreatedAt     // DateTimeOffset
+            }).ToArray()
+        };
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Queries\GetInvoiceDetails\GetInvoiceDetailsQuery.cs ===
+using GatewayService.AccountCharge.Application.DTOs;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceDetails;
+
+public sealed record GetInvoiceDetailsQuery(string InvoiceNumber) : IRequest<InvoiceDto>;
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Queries\GetInvoiceStatus\GetInvoiceStatusHandler.cs ===
+using System;
+using System.Linq;
+using GatewayService.AccountCharge.Application.DTOs;
+using GatewayService.AccountCharge.Domain.Repositories;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceStatus;
+
+public sealed class GetInvoiceStatusHandler : IRequestHandler<GetInvoiceStatusQuery, InvoiceDto>
+{
+    private readonly IInvoiceRepository _repo;
+
+    public GetInvoiceStatusHandler(IInvoiceRepository repo) => _repo = repo;
+
+    public async Task<InvoiceDto> Handle(GetInvoiceStatusQuery request, CancellationToken ct)
+    {
+        var invoice = await _repo.GetByIdAsync(request.InvoiceId, ct)
+            ?? throw new KeyNotFoundException("Invoice not found");
+
+        return new InvoiceDto
+        {
+            Id = invoice.Id,
+            InvoiceNumber = invoice.InvoiceNumber,
+            Currency = invoice.ExpectedAmount.Currency,
+            ExpectedAmount = invoice.ExpectedAmount.Amount,
+            TotalPaid = invoice.TotalPaid,
+            Status = invoice.Status,
+
+            // Domain: DateTime → DTO: DateTimeOffset
+            CreatedAt = new DateTimeOffset(invoice.CreatedAt, TimeSpan.Zero),
+            ExpiresAt = invoice.ExpiresAt.HasValue
+                ? new DateTimeOffset(invoice.ExpiresAt.Value, TimeSpan.Zero)
+                : (DateTimeOffset?)null,
+
+            // InvoiceAddress اسکالرها
+            Addresses = invoice.Addresses.Select(a => new InvoiceAddressDto
+            {
+                Address = a.Address,
+                Tag = a.Tag,
+                Network = a.Network,
+                WalletId = a.WalletId,
+                Currency = a.Currency,
+                CreatedAt = a.CreatedAt // DateTimeOffset
+            }).ToArray()
+        };
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Queries\GetInvoiceStatus\GetInvoiceStatusQuery.cs ===
+using GatewayService.AccountCharge.Application.DTOs;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceStatus;
+
+public sealed record GetInvoiceStatusQuery(Guid InvoiceId) : IRequest<InvoiceDto>;
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Queries\GetInvoiceTransactions\GetInvoiceTransactionsHandler.cs ===
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Application.DTOs;
+using GatewayService.AccountCharge.Application.Queries.GetInvoiceTransactions;
+using GatewayService.AccountCharge.Domain.Invoices;
+using GatewayService.AccountCharge.Domain.Repositories;
+using GatewayService.AccountCharge.Domain.ValueObjects;
+using MediatR;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceTransactions;
+
+public sealed class GetInvoiceTransactionsHandler
+    : IRequestHandler<GetInvoiceTransactionsQuery, IReadOnlyList<IncomingDepositDto>>
+{
+    private const int MaxLimit = 200;
+    private static readonly TimeSpan DefaultLookback = TimeSpan.FromDays(7);
+
+    private readonly IInvoiceRepository _repo;
+    private readonly INobitexClient _nobitex;
+
+    public GetInvoiceTransactionsHandler(IInvoiceRepository repo, INobitexClient nobitex)
+    {
+        _repo = repo;
+        _nobitex = nobitex;
+    }
+
+    public async Task<IReadOnlyList<IncomingDepositDto>> Handle(GetInvoiceTransactionsQuery request, CancellationToken ct)
+    {
+        var invoice = await _repo.GetByIdAsync(request.InvoiceId, ct)
+            ?? throw new KeyNotFoundException("Invoice not found.");
+
+        var walletIds = invoice.Addresses.Select(a => a.WalletId).Distinct().ToArray();
+        if (walletIds.Length == 0)
+            return Array.Empty<IncomingDepositDto>();
+
+        var since = request.SinceUtc ?? DateTimeOffset.UtcNow - DefaultLookback;
+        var limit = Math.Clamp(request.Limit ?? MaxLimit, 1, MaxLimit);
+
+        var results = new List<IncomingDepositDto>(capacity: walletIds.Length * 32);
+
+        foreach (var wid in walletIds)
+        {
+            var deposits = await _nobitex.GetRecentDepositsAsync(wid, limit, since, ct);
+            results.AddRange(deposits);
+        }
+
+        // Distinct by TxHash (case-insensitive)
+        var distinct = results
+            .Where(d => !string.IsNullOrWhiteSpace(d.TxHash))
+            .GroupBy(d => d.TxHash!.Trim(), StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderByDescending(x => x.CreatedAt).First()) // latest snapshot per tx
+            .ToList();
+
+        if (request.OnlyInvoiceAddresses)
+        {
+            // Keep only deposits whose (address, network, tag) belongs to this invoice
+            bool Owns(Invoice inv, IncomingDepositDto dep)
+            {
+                var addr = new ChainAddress(dep.Address, dep.Network, dep.Tag);
+                return inv.OwnsAddress(addr);
+            }
+
+            distinct = distinct.Where(d => Owns(invoice, d)).ToList();
+        }
+
+        // Sort desc by time
+        return distinct
+            .OrderByDescending(d => d.CreatedAt)
+            .ToList();
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Queries\GetInvoiceTransactions\GetInvoiceTransactionsQuery.cs ===
+using System.Collections.Generic;
+using MediatR;
+using GatewayService.AccountCharge.Application.DTOs;
+
+namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceTransactions;
+
+public sealed record GetInvoiceTransactionsQuery(
+    Guid InvoiceId,
+    int? Limit,
+    DateTimeOffset? SinceUtc,
+    bool OnlyInvoiceAddresses = true
+) : IRequest<IReadOnlyList<IncomingDepositDto>>;
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Queries\GetInvoiceTransactionsAll\GetInvoiceTransactionsAllHandler.cs ===
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Application.DTOs;
+using GatewayService.AccountCharge.Domain.Invoices;
+using GatewayService.AccountCharge.Domain.Repositories;
+using GatewayService.AccountCharge.Domain.ValueObjects;
+using MediatR;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceTransactionsAll;
+
+public sealed class GetInvoiceTransactionsAllHandler
+    : IRequestHandler<GetInvoiceTransactionsAllQuery, IReadOnlyList<IncomingDepositDto>>
+{
+    // 🔧 Hard-coded defaults (tune as needed)
+    private const int PAGE_SIZE = 200;                 // per-wallet pull cap
+    private static readonly TimeSpan LOOKBACK = TimeSpan.FromDays(90);
+
+    private readonly IInvoiceRepository _repo;
+    private readonly INobitexClient _nobitex;
+
+    public GetInvoiceTransactionsAllHandler(
+        IInvoiceRepository repo,
+        INobitexClient nobitex)
+    {
+        _repo = repo;
+        _nobitex = nobitex;
+    }
+
+    public async Task<IReadOnlyList<IncomingDepositDto>> Handle(GetInvoiceTransactionsAllQuery request, CancellationToken ct)
+    {
+        var invoice = await _repo.GetByIdAsync(request.InvoiceId, ct)
+            ?? throw new KeyNotFoundException("Invoice not found.");
+
+        var walletIds = invoice.Addresses.Select(a => a.WalletId).Distinct().ToArray();
+        if (walletIds.Length == 0)
+            return Array.Empty<IncomingDepositDto>();
+
+        var cutoff = DateTimeOffset.UtcNow - LOOKBACK;
+        var all = new List<IncomingDepositDto>(capacity: walletIds.Length * 256);
+
+        // Pull once per walletId (bounded by PAGE_SIZE & LOOKBACK)
+        foreach (var wid in walletIds)
+        {
+            var batch = await _nobitex.GetRecentDepositsAsync(wid, PAGE_SIZE, cutoff, ct);
+            if (batch is { Count: > 0 })
+                all.AddRange(batch);
+        }
+
+        // De-dup by txHash (case-insensitive), keep latest snapshot
+        var distinct = all
+            .Where(d => !string.IsNullOrWhiteSpace(d.TxHash))
+            .GroupBy(d => d.TxHash!.Trim(), StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderByDescending(x => x.CreatedAt).First())
+            .ToList();
+
+        // Filter to addresses owned by this invoice (safe default)
+        bool Owns(IncomingDepositDto dep)
+        {
+            var addr = new ChainAddress(dep.Address, dep.Network, dep.Tag);
+            return invoice.OwnsAddress(addr);
+        }
+        distinct = distinct.Where(Owns).ToList();
+
+        // newest → oldest
+        return distinct
+            .OrderByDescending(d => d.CreatedAt)
+            .ToList();
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Queries\GetInvoiceTransactionsAll\GetInvoiceTransactionsAllQuery.cs ===
+using System;
+using System.Collections.Generic;
+using GatewayService.AccountCharge.Application.DTOs;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceTransactionsAll;
+
+public sealed record GetInvoiceTransactionsAllQuery(Guid InvoiceId)
+    : IRequest<IReadOnlyList<IncomingDepositDto>>;
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Services\DepositMatchingOrchestrator.cs ===
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Application.DTOs;
+using GatewayService.AccountCharge.Domain.Invoices;
+using GatewayService.AccountCharge.Domain.Repositories;
+using GatewayService.AccountCharge.Domain.ValueObjects;
+using Microsoft.Extensions.Logging;
+
+namespace GatewayService.AccountCharge.Application.Services;
+
+public sealed class DepositMatchingOrchestrator
+{
+    private readonly INobitexClient _nobitex;
+    private readonly IInvoiceRepository _invoices;
+    private readonly IPaymentMatchingOptionsProvider _opts;
+    private readonly IUnitOfWork _uow;
+    private readonly ILogger<DepositMatchingOrchestrator> _log;
+
+    public DepositMatchingOrchestrator(
+        INobitexClient nobitex,
+        IInvoiceRepository invoices,
+        IPaymentMatchingOptionsProvider opts,
+        IUnitOfWork uow,
+        ILogger<DepositMatchingOrchestrator> log)
+    {
+        _nobitex = nobitex;
+        _invoices = invoices;
+        _opts = opts;
+        _uow = uow;
+        _log = log;
+    }
+
+    public async Task<int> SyncInvoiceAsync(Guid invoiceId, CancellationToken ct)
+    {
+        var invoice = await _invoices.GetByIdAsync(invoiceId, ct)
+                      ?? throw new InvalidOperationException("Invoice not found.");
+
+        int applied = 0;
+
+        foreach (var addr in invoice.Addresses)
+        {
+            var since = new DateTimeOffset(invoice.CreatedAt, TimeSpan.Zero);
+            var deposits = await _nobitex.GetRecentDepositsAsync(addr.WalletId, limit: 30, since: since, ct);
+
+            foreach (var d in deposits)
+            {
+                // 🔒 skip globally-applied txs
+                if (!string.IsNullOrWhiteSpace(d.TxHash) &&
+                    await _invoices.HasAnyAppliedDepositAsync(d.TxHash!, ct))
+                {
+                    continue;
+                }
+
+                // currency guard
+                if (!string.Equals(d.Currency, invoice.ExpectedAmount.Currency, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // optional tag/memo guard
+                if (!string.IsNullOrWhiteSpace(addr.Tag) &&
+                    !string.Equals(addr.Tag, d.Tag ?? string.Empty, StringComparison.Ordinal))
+                    continue;
+
+                var chain = new ChainAddress(d.Address, d.Network ?? string.Empty, d.Tag);
+                var money = new Money(d.Amount, d.Currency);
+                var pm = _opts.Get(d.Currency, d.Network ?? string.Empty);
+
+                var incoming = new IncomingDeposit(
+                    new TransactionHash(d.TxHash!),
+                    chain,
+                    money,
+                    d.Confirmed,
+                    d.Confirmations,
+                    d.RequiredConfirmations,
+                    d.CreatedAt
+                );
+
+                var ok = invoice.TryApplyDeposit(incoming, pm, out var reason);
+
+                if (ok && !string.Equals(reason, "Already applied", StringComparison.OrdinalIgnoreCase))
+                    applied++;
+            }
+        }
+
+        await _uow.SaveChangesAsync(ct);
+        return applied;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Common\DomainEvent.cs ===
+namespace GatewayService.AccountCharge.Domain.Common;
+
+// Keep domain events free of external dependencies.
+// Application layer can adapt these to MediatR notifications later.
+public interface IDomainEvent { DateTime OccurredOn { get; } }
+
+public abstract class DomainEventBase : IDomainEvent
+{
+    public DateTime OccurredOn { get; } = DateTime.UtcNow;
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Common\Entity.cs ===
+namespace GatewayService.AccountCharge.Domain.Common;
+
+public abstract class Entity
+{
+    public Guid Id { get; protected set; } = Guid.NewGuid();
+
+    private readonly List<IDomainEvent> _domainEvents = new();
+    public IReadOnlyCollection<IDomainEvent> DomainEvents => _domainEvents;
+
+    protected void Raise(IDomainEvent @event) => _domainEvents.Add(@event);
+
+    public void ClearDomainEvents() => _domainEvents.Clear();
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Common\ValueObject.cs ===
+namespace GatewayService.AccountCharge.Domain.Common;
+
+public abstract class ValueObject : IEquatable<ValueObject>
+{
+    protected abstract IEnumerable<object?> GetAtomicValues();
+
+    public override bool Equals(object? obj) => obj is ValueObject other && Equals(other);
+
+    public bool Equals(ValueObject? other)
+    {
+        if (other is null || GetType() != other.GetType()) return false;
+
+        using var thisValues = GetAtomicValues().GetEnumerator();
+        using var otherValues = other.GetAtomicValues().GetEnumerator();
+
+        while (thisValues.MoveNext() && otherValues.MoveNext())
+        {
+            if (thisValues.Current is null ^ otherValues.Current is null) return false;
+            if (thisValues.Current is not null && !thisValues.Current.Equals(otherValues.Current)) return false;
+        }
+
+        return !thisValues.MoveNext() && !otherValues.MoveNext();
+    }
+
+    public override int GetHashCode() =>
+        GetAtomicValues()
+            .Aggregate(0, (hash, obj) => HashCode.Combine(hash, obj?.GetHashCode() ?? 0));
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Enums\InvoiceStatus.cs ===
+namespace GatewayService.AccountCharge.Domain.Enums;
+
+public enum InvoiceStatus
+{
+    Pending = 0,        // No deposit matched yet
+    PartiallyPaid = 1,  // Some deposit(s) matched but less than expected
+    Paid = 2,           // Fully paid within tolerance
+    Overpaid = 3,       // Paid more than expected (beyond tolerance)
+    Expired = 4,        // Payment window elapsed
+    Canceled = 5        // Manually canceled
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Exceptions\DomainException.cs ===
+namespace GatewayService.AccountCharge.Domain.Exceptions;
+
+public class DomainException : Exception
+{
+    public DomainException(string message) : base(message) { }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Invoices\AppliedDeposit.cs ===
+using GatewayService.AccountCharge.Domain.Common;
+using GatewayService.AccountCharge.Domain.ValueObjects;
+
+namespace GatewayService.AccountCharge.Domain.Invoices;
+/// <summary>
+/// Deposit that has been matched and applied to an invoice (persisted).
+/// </summary>
+public sealed class AppliedDeposit : Entity
+{
+    public Guid Id { get; private set; }                // GUID PK
+    public Guid InvoiceId { get; private set; }
+    public TransactionHash TxHash { get; private set; } = default!;
+    public ChainAddress Address { get; private set; } = default!;
+    public Money Amount { get; private set; } = default!;
+    public DateTimeOffset ObservedAt { get; private set; }
+    public bool WasConfirmed { get; private set; }
+    public int Confirmations { get; private set; }
+    public int RequiredConfirmations { get; private set; }
+
+    private AppliedDeposit() { } // EF
+
+    internal AppliedDeposit(
+
+        Guid invoiceId,
+        TransactionHash txHash,
+        ChainAddress address,
+        Money amount,
+        bool wasConfirmed,
+        int confirmations,
+        int requiredConfirmations,
+        DateTimeOffset observedAt)
+    {
+        Id = Guid.NewGuid();            // <<<< generate here
+        InvoiceId = invoiceId;
+        TxHash = txHash;
+        Address = address;
+        Amount = amount;
+        WasConfirmed = wasConfirmed;
+        Confirmations = confirmations;
+        RequiredConfirmations = requiredConfirmations;
+        ObservedAt = observedAt;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Invoices\Events.cs ===
+using GatewayService.AccountCharge.Domain.Common;
+using GatewayService.AccountCharge.Domain.ValueObjects;
+using GatewayService.AccountCharge.Domain.Enums;
+
+namespace GatewayService.AccountCharge.Domain.Invoices;
+public sealed class InvoiceCreated : DomainEventBase
+{
+    public Guid InvoiceId { get; }
+    public InvoiceCreated(Guid invoiceId) => InvoiceId = invoiceId;
+}
+
+public sealed class DepositMatchedToInvoice : DomainEventBase
+{
+    public Guid InvoiceId { get; }
+    public string TxHash { get; }
+    public decimal Amount { get; }
+    public string Currency { get; }
+
+    public DepositMatchedToInvoice(Guid invoiceId, string txHash, decimal amount, string currency)
+    {
+        InvoiceId = invoiceId;
+        TxHash = txHash;
+        Amount = amount;
+        Currency = currency;
+    }
+}
+
+public sealed class InvoiceStatusChanged : DomainEventBase
+{
+    public Guid InvoiceId { get; }
+    public InvoiceStatus From { get; }
+    public InvoiceStatus To { get; }
+
+    public InvoiceStatusChanged(Guid invoiceId, InvoiceStatus from, InvoiceStatus to)
+    {
+        InvoiceId = invoiceId;
+        From = from;
+        To = to;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Invoices\IncomingDeposit.cs ===
+using GatewayService.AccountCharge.Domain.ValueObjects;
+
+
+
+
+namespace GatewayService.AccountCharge.Domain.Invoices;
+/// <summary>
+/// Raw deposit observed from Nobitex GET /users/wallets/deposits/list.
+/// This is an input to the domain (not persisted by itself).
+/// </summary>
+public sealed class IncomingDeposit
+{
+    public TransactionHash TxHash { get; }
+    public ChainAddress Address { get; }
+    public Money Amount { get; }
+    public bool Confirmed { get; }
+    public int Confirmations { get; }
+    public int RequiredConfirmations { get; }
+    public DateTimeOffset CreatedAt { get; }
+
+    public IncomingDeposit(
+        TransactionHash txHash,
+        ChainAddress address,
+        Money amount,
+        bool confirmed,
+        int confirmations,
+        int requiredConfirmations,
+        DateTimeOffset createdAt)
+    {
+        TxHash = txHash;
+        Address = address;
+        Amount = amount;
+        Confirmed = confirmed;
+        Confirmations = confirmations;
+        RequiredConfirmations = requiredConfirmations;
+        CreatedAt = createdAt;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Invoices\Invoice.cs ===
+using GatewayService.AccountCharge.Domain.Common;
+using GatewayService.AccountCharge.Domain.Enums;
+using GatewayService.AccountCharge.Domain.Exceptions;
+using GatewayService.AccountCharge.Domain.ValueObjects;
+
+
+namespace GatewayService.AccountCharge.Domain.Invoices;
+/// <summary>
+/// Aggregate Root for crypto payment through exchange deposit.
+/// </summary>
+public sealed class Invoice : Entity
+{
+    // Identity & metadata
+    public string InvoiceNumber { get; private set; } = default!;
+    public string? CustomerId { get; private set; }
+    public InvoiceStatus Status { get; private set; } = InvoiceStatus.Pending;
+
+    // What we expect to receive
+    public Money ExpectedAmount { get; private set; } = default!;
+
+    // Window
+    public DateTime CreatedAt { get; private set; }
+    public DateTime? ExpiresAt { get; private set; }
+
+    // Addresses reserved for this invoice (1..n)
+    private readonly List<InvoiceAddress> _addresses = new();
+    public IReadOnlyCollection<InvoiceAddress> Addresses => _addresses;
+
+    // Matched deposits already applied (idempotent via TxHash)
+    private readonly List<AppliedDeposit> _appliedDeposits = new();
+    public IReadOnlyCollection<AppliedDeposit> AppliedDeposits => _appliedDeposits;
+
+    // Computed totals
+    public decimal TotalPaid => _appliedDeposits
+        .Where(d => string.Equals(d.Amount.Currency, ExpectedAmount.Currency, StringComparison.OrdinalIgnoreCase))
+        .Sum(d => d.Amount.Amount);
+
+    public object Payments { get; set; }
+
+    private Invoice() { } // EF
+
+    private Invoice(string invoiceNumber, Money expectedAmount, string? customerId, DateTime createdAt, DateTime? expiresAt)
+    {
+        if (string.IsNullOrWhiteSpace(invoiceNumber)) throw new ArgumentException("Invoice number is required");
+        if (expiresAt.HasValue && expiresAt.Value <= createdAt)
+            throw new ArgumentException("ExpiresAt must be greater than CreatedAt");
+
+        InvoiceNumber = invoiceNumber.Trim();
+        ExpectedAmount = expectedAmount;
+        CustomerId = string.IsNullOrWhiteSpace(customerId) ? null : customerId.Trim();
+        CreatedAt = createdAt;
+        ExpiresAt = expiresAt;
+
+        Raise(new InvoiceCreated(Id));
+    }
+
+    public static Invoice Create(string invoiceNumber, Money expectedAmount, string? customerId, TimeSpan? ttl = null, DateTime? now = null)
+    {
+        var created = now ?? DateTime.UtcNow;
+        DateTime? expires = ttl.HasValue ? created.Add(ttl.Value) : null;
+        return new Invoice(invoiceNumber, expectedAmount, customerId, created, expires);
+    }
+
+    public void AddAddress(ChainAddress address, WalletRef wallet, DateTimeOffset? now = null)
+    {
+        if (Status is InvoiceStatus.Paid or InvoiceStatus.Overpaid or InvoiceStatus.Expired or InvoiceStatus.Canceled)
+            throw new DomainException("Cannot add address to a closed invoice");
+
+        // Avoid duplicates: same (address + network + tag + walletId)
+        if (_addresses.Any(a =>
+                string.Equals(a.Address, address.Address, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(a.Network ?? string.Empty, address.Network ?? string.Empty, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(a.Tag ?? string.Empty, address.Tag ?? string.Empty, StringComparison.Ordinal) &&
+                a.WalletId == wallet.WalletId))
+        {
+            return;
+        }
+
+        _addresses.Add(new InvoiceAddress(
+            walletId: wallet.WalletId,
+            currency: wallet.Currency,
+            address: address.Address,
+            network: address.Network,
+            tag: address.Tag,
+            createdAt: now ?? DateTimeOffset.UtcNow
+        ));
+    }
+
+    public bool OwnsAddress(ChainAddress addr) =>
+    _addresses.Any(a =>
+        string.Equals(a.Address, addr.Address, StringComparison.OrdinalIgnoreCase) &&
+        (string.IsNullOrEmpty(addr.Network) ||
+         string.Equals(a.Network ?? string.Empty, addr.Network ?? string.Empty, StringComparison.OrdinalIgnoreCase)) &&
+        string.Equals(a.Tag ?? string.Empty, addr.Tag ?? string.Empty, StringComparison.Ordinal)
+    );
+
+
+    public bool IsExpired(DateTime? now = null)
+    {
+        if (!ExpiresAt.HasValue) return false;
+        return (now ?? DateTime.UtcNow) > ExpiresAt.Value;
+    }
+
+    public decimal RemainingToPay() => Math.Max(0m, ExpectedAmount.Amount - TotalPaid);
+
+    /// <summary>
+    /// Apply an observed deposit to this invoice if it matches the rules.
+    /// Idempotent by TxHash (won't double-apply).
+    /// </summary>
+    public bool TryApplyDeposit(IncomingDeposit incoming, PaymentMatchingOptions opts, out string reason)
+    {
+        reason = string.Empty;
+
+        if (IsExpired())
+        {
+            TransitionTo(InvoiceStatus.Expired);
+            reason = "Invoice expired";
+            return false;
+        }
+
+        // Currency must match invoice currency
+        if (!string.Equals(incoming.Amount.Currency, ExpectedAmount.Currency, StringComparison.OrdinalIgnoreCase))
+        {
+            reason = "Currency mismatch";
+            return false;
+        }
+
+        // Require known address (strongly recommended)
+        if (opts.RequireKnownAddress && !OwnsAddress(incoming.Address))
+        {
+            reason = "Address is not registered for this invoice";
+            return false;
+        }
+
+        // Confirmations
+        if (incoming.Confirmations < Math.Max(opts.MinConfirmations, incoming.RequiredConfirmations))
+        {
+            reason = "Not enough confirmations";
+            return false;
+        }
+
+        // Idempotency by TxHash
+        if (_appliedDeposits.Any(d => d.TxHash.Equals(incoming.TxHash)))
+        {
+            reason = "Already applied";
+            return true; // idempotent no-op
+        }
+
+        // If multiple deposits are not allowed and we already have some, reject
+        if (!opts.AllowMultipleDeposits && _appliedDeposits.Any())
+        {
+            reason = "Multiple deposits not allowed";
+            return false;
+        }
+
+        // Apply
+        var applied = new AppliedDeposit(
+            invoiceId: Id,
+            txHash: incoming.TxHash,
+            address: incoming.Address,
+            amount: incoming.Amount,
+            wasConfirmed: incoming.Confirmed,
+            confirmations: incoming.Confirmations,
+            requiredConfirmations: incoming.RequiredConfirmations,
+            observedAt: incoming.CreatedAt
+        );
+
+        _appliedDeposits.Add(applied);
+        Raise(new DepositMatchedToInvoice(Id, incoming.TxHash.Value, incoming.Amount.Amount, incoming.Amount.Currency));
+
+        // Re-evaluate status
+        UpdateStatusWithTolerance(opts);
+
+        return true;
+    }
+
+    private void UpdateStatusWithTolerance(PaymentMatchingOptions opts)
+    {
+        var prev = Status;
+
+        var paid = TotalPaid;
+        var expected = ExpectedAmount.Amount;
+
+        var absTol = opts.AbsoluteTolerance;
+        var pctTol = opts.PercentageTolerance > 0 ? expected * opts.PercentageTolerance : 0m;
+        var tol = Math.Max(absTol, pctTol);
+
+        if (paid >= expected - tol && paid <= expected + tol)
+        {
+            TransitionTo(InvoiceStatus.Paid);
+        }
+        else if (paid < expected - tol && paid > 0m)
+        {
+            TransitionTo(InvoiceStatus.PartiallyPaid);
+        }
+        else if (paid > expected + tol)
+        {
+            TransitionTo(InvoiceStatus.Overpaid);
+        }
+        else if (paid == 0m)
+        {
+            TransitionTo(InvoiceStatus.Pending);
+        }
+
+        if (Status != prev)
+        {
+            Raise(new InvoiceStatusChanged(Id, prev, Status));
+        }
+    }
+
+    public void MarkExpired(DateTime? now = null)
+    {
+        if (Status is InvoiceStatus.Paid or InvoiceStatus.Overpaid or InvoiceStatus.Canceled) return;
+        if (!IsExpired(now)) return;
+        TransitionTo(InvoiceStatus.Expired);
+        Raise(new InvoiceStatusChanged(Id, InvoiceStatus.Pending, InvoiceStatus.Expired));
+    }
+
+    public void Cancel()
+    {
+        if (Status is InvoiceStatus.Paid or InvoiceStatus.Overpaid or InvoiceStatus.Expired)
+            throw new DomainException("Cannot cancel a closed invoice");
+        TransitionTo(InvoiceStatus.Canceled);
+        Raise(new InvoiceStatusChanged(Id, Status, InvoiceStatus.Canceled));
+    }
+
+    private void TransitionTo(InvoiceStatus newStatus)
+    {
+        Status = newStatus;
+    }
+}
+
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Invoices\InvoiceAddress.cs ===
+public sealed class InvoiceAddress
+{
+    public Guid Id { get; private set; }
+    public Guid InvoiceId { get; private set; }   // ← اضافه کن (FK صریح)
+
+    public int WalletId { get; private set; }
+    public string Currency { get; private set; } = default!;
+    public string Address { get; private set; } = default!;
+    public string? Network { get; private set; }
+    public string? Tag { get; private set; }
+    public DateTimeOffset CreatedAt { get; private set; }  // ← Offset
+
+    private InvoiceAddress() { }
+
+    public InvoiceAddress(int walletId, string currency, string address, string? network, string? tag, DateTimeOffset createdAt)
+    {
+        Id = Guid.NewGuid();
+        WalletId = walletId;
+        Currency = currency;
+        Address = address;
+        Network = network;
+        Tag = tag;
+        CreatedAt = createdAt;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Invoices\PaymentMatchingOptions.cs ===
+namespace GatewayService.AccountCharge.Domain.Invoices;
+/// <summary>
+/// Controls how deposits are considered "valid" and how tolerance works.
+/// </summary>
+public sealed class PaymentMatchingOptions
+{
+    /// <summary>
+    /// Minimal confirmations required to apply a deposit (e.g., 1..network required).
+    /// </summary>
+    public int MinConfirmations { get; init; } = 1;
+
+    /// <summary>
+    /// Absolute tolerance in currency units (e.g., 0.000001 BTC) to account for rounding/netting.
+    /// </summary>
+    public decimal AbsoluteTolerance { get; init; } = 0m;
+
+    /// <summary>
+    /// Percentage tolerance (0..1); e.g., 0.001 = 0.1%.
+    /// </summary>
+    public decimal PercentageTolerance { get; init; } = 0m;
+
+    /// <summary>
+    /// When true, only deposits to known invoice addresses are accepted.
+    /// </summary>
+    public bool RequireKnownAddress { get; init; } = true;
+
+    /// <summary>
+    /// Whether to accept multiple deposits accumulating to expected amount.
+    /// </summary>
+    public bool AllowMultipleDeposits { get; init; } = true;
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Repositories\IInvoiceRepository.cs ===
+using GatewayService.AccountCharge.Domain.Invoices;
+using GatewayService.AccountCharge.Domain.ValueObjects;
+using System.Linq.Expressions;
+
+namespace GatewayService.AccountCharge.Domain.Repositories;
+
+public interface IInvoiceRepository
+{
+    Task<Invoice?> GetByIdAsync(Guid id, CancellationToken ct = default);
+    Task<Invoice?> GetByAddressAsync(ChainAddress address, CancellationToken ct = default); // legacy
+    Task<Invoice?> GetByNumberAsync(string invoiceNumber, CancellationToken ct = default);
+
+    Task AddAsync(Invoice invoice, CancellationToken ct = default);
+    Task UpdateAsync(Invoice invoice, CancellationToken ct = default);
+
+    Task<bool> HasAppliedDepositAsync(Guid invoiceId, string txHash, CancellationToken ct = default);
+
+    // ✅ add this:
+    Task<bool> HasAnyAppliedDepositAsync(string txHash, CancellationToken ct = default);
+
+    Task<bool> ExistsAsync(Expression<Func<Invoice, bool>> predicate, CancellationToken ct = default);
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\ValueObjects\ChainAddress.cs ===
+using GatewayService.AccountCharge.Domain.Common;
+
+public sealed class ChainAddress : ValueObject
+{
+    public string Address { get; }
+    public string? Tag { get; }
+    public string? Network { get; }   // optional
+
+    public ChainAddress(string address, string? network, string? tag = null)
+    {
+        if (string.IsNullOrWhiteSpace(address))
+            throw new ArgumentException("Address is required");
+
+        Address = address.Trim();
+        Tag = string.IsNullOrWhiteSpace(tag) ? null : tag.Trim();
+
+        Network = NormalizeNetwork(network);
+    }
+
+    private static string? NormalizeNetwork(string? net)
+    {
+        if (string.IsNullOrWhiteSpace(net)) return null;
+
+        return net.Trim().ToUpperInvariant() switch
+        {
+            "BEP20" or "BEP-20" or "BSC" => "BSC",
+            "TRC20" or "TRON" => "TRC20",
+            "ERC20" or "ETHEREUM" => "ERC20",
+            _ => net.Trim().ToUpperInvariant()
+        };
+    }
+
+    protected override IEnumerable<object?> GetAtomicValues()
+    {
+        yield return Address.ToLowerInvariant();
+        yield return Tag?.ToLowerInvariant();
+        yield return Network;
+    }
+
+    public override string ToString() =>
+        Tag is null
+            ? $"{Address} ({Network ?? "?"})"
+            : $"{Address} ({Network ?? "?"}) [tag:{Tag}]";
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\ValueObjects\Money.cs ===
+using GatewayService.AccountCharge.Domain.Common;
+
+namespace GatewayService.AccountCharge.Domain.ValueObjects;
+
+/// <summary>
+/// Monetary amount with currency code (e.g., "BTC", "ETH", "USDT").
+/// Use decimal for safety; keep amounts from Nobitex as string->decimal.
+/// </summary>
+public sealed class Money : ValueObject
+{
+    public decimal Amount { get; }
+    public string Currency { get; }
+
+    public Money(decimal amount, string currency)
+    {
+        if (string.IsNullOrWhiteSpace(currency)) throw new ArgumentException("Currency is required");
+        if (amount < 0) throw new ArgumentException("Amount cannot be negative");
+        Currency = currency.Trim().ToUpperInvariant();
+        Amount = amount;
+    }
+
+    public Money Add(Money other)
+    {
+        EnsureSameCurrency(other);
+        return new Money(Amount + other.Amount, Currency);
+    }
+
+    public int CompareTo(Money other)
+    {
+        EnsureSameCurrency(other);
+        return Amount.CompareTo(other.Amount);
+    }
+
+    public bool IsZero => Amount == 0m;
+
+    private void EnsureSameCurrency(Money other)
+    {
+        if (!string.Equals(Currency, other.Currency, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Currency mismatch");
+    }
+
+    protected override IEnumerable<object?> GetAtomicValues()
+    {
+        yield return Amount;
+        yield return Currency;
+    }
+
+    public override string ToString() => $"{Amount} {Currency}";
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\ValueObjects\TransactionHash.cs ===
+using GatewayService.AccountCharge.Domain.Common;
+
+namespace GatewayService.AccountCharge.Domain.ValueObjects;
+
+public sealed class TransactionHash : ValueObject
+{
+    public string Value { get; }
+
+    public TransactionHash(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) throw new ArgumentException("Tx hash is required");
+        Value = value.Trim();
+    }
+
+    protected override IEnumerable<object?> GetAtomicValues()
+    {
+        yield return Value.ToLowerInvariant();
+    }
+
+    public override string ToString() => Value;
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\ValueObjects\WalletRef.cs ===
+using GatewayService.AccountCharge.Domain.Common;
+
+namespace GatewayService.AccountCharge.Domain.ValueObjects;
+
+/// <summary>
+/// Reference to the exchange wallet in Nobitex (wallet id + currency code).
+/// </summary>
+public sealed class WalletRef : ValueObject
+{
+    public int WalletId { get; }
+    public string Currency { get; }
+
+    public WalletRef(int walletId, string currency)
+    {
+        if (walletId <= 0) throw new ArgumentException("Invalid wallet id");
+        if (string.IsNullOrWhiteSpace(currency)) throw new ArgumentException("Currency is required");
+
+        WalletId = walletId;
+        Currency = currency.Trim().ToUpperInvariant();
+    }
+
+    protected override IEnumerable<object?> GetAtomicValues()
+    {
+        yield return WalletId;
+        yield return Currency;
+    }
+
+    public override string ToString() => $"{Currency}#{WalletId}";
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Background\NobitexPollingService.cs ===
+using GatewayService.AccountCharge.Application.Services;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+
+namespace GatewayService.AccountCharge.Infrastructure.Background;
+
+public sealed class NobitexPollingService : BackgroundService
+{
+    private readonly ILogger<NobitexPollingService> _logger;
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly TimeSpan _interval;
+    private readonly IConfiguration _config;
+
+    public NobitexPollingService(
+        ILogger<NobitexPollingService> logger,
+        IServiceScopeFactory scopeFactory,
+        IConfiguration config)
+    {
+        _logger = logger;
+        _scopeFactory = scopeFactory;
+        _config = config;
+        var seconds = _config.GetValue<int?>("Nobitex:PollingSeconds") ?? 30;
+        _interval = TimeSpan.FromSeconds(seconds);
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _logger.LogInformation("Nobitex polling service started. Interval: {Seconds}s", _interval.TotalSeconds);
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+
+                // Resolve scoped services inside the scope:
+                var orchestrator = scope.ServiceProvider.GetRequiredService<DepositMatchingOrchestrator>();
+
+                // TODO: decide which wallets to poll. Example: read from config or DB.
+                // var walletIds = new[] { 123, 456 }; // placeholder
+                // foreach (var wid in walletIds)
+                // {
+                //     var res = await orchestrator.FetchAndApplyAsync(wid, limit: 30, since: null, stoppingToken);
+                //     _logger.LogInformation("Wallet {Wid}: total={Total} matched={Matched} applied={Applied} already={Already} rejected={Rejected}",
+                //         wid, res.Total, res.Matched, res.Applied, res.AlreadyApplied, res.Rejected);
+                // }
+
+                // If you don't yet have the polling loop logic, at least touch orchestrator once:
+                _ = orchestrator; // keep compiler happy until you wire actual logic
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                // graceful shutdown
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error in Nobitex polling iteration");
+            }
+
+            try
+            {
+                await Task.Delay(_interval, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                // shutting down
+            }
+        }
+
+        _logger.LogInformation("Nobitex polling service stopped.");
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Http\Models\NobitexDepositsModels.cs ===
+using System.Text.Json.Serialization;
+
+namespace GatewayService.AccountCharge.Infrastructure.Http.Models;
+
+internal sealed class NobitexDepositsResponse
+{
+    [JsonPropertyName("status")] public string? Status { get; set; }
+    [JsonPropertyName("deposits")] public List<NobitexDeposit>? Deposits { get; set; }
+    [JsonPropertyName("hasNext")] public bool? HasNext { get; set; }
+}
+
+internal sealed class NobitexDeposit
+{
+    [JsonPropertyName("txHash")] public string? TxHash { get; set; }
+    [JsonPropertyName("address")] public string? Address { get; set; }
+    [JsonPropertyName("confirmed")] public bool Confirmed { get; set; }
+
+    [JsonPropertyName("transaction")] public NobitexTransaction? Transaction { get; set; }
+
+    [JsonPropertyName("currency")] public string? CurrencyName { get; set; } // e.g. "Bitcoin"
+    [JsonPropertyName("blockchainUrl")] public string? BlockchainUrl { get; set; }
+    [JsonPropertyName("confirmations")] public int Confirmations { get; set; }
+    [JsonPropertyName("requiredConfirmations")] public int RequiredConfirmations { get; set; }
+    [JsonPropertyName("amount")] public string? Amount { get; set; }
+}
+
+internal sealed class NobitexTransaction
+{
+    [JsonPropertyName("id")] public int Id { get; set; }
+    [JsonPropertyName("amount")] public string? Amount { get; set; }
+    [JsonPropertyName("currency")] public string? Currency { get; set; } // e.g. "btc"
+    [JsonPropertyName("description")] public string? Description { get; set; }
+    [JsonPropertyName("created_at")] public DateTime CreatedAt { get; set; }
+    [JsonPropertyName("calculatedFee")] public string? CalculatedFee { get; set; }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Http\AccountingClient.cs ===
+// D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Http\AccountingClient.cs
+using System.Net.Http.Json;
+using GatewayService.AccountCharge.Application.Abstractions;
+
+namespace GatewayService.AccountCharge.Infrastructure.Http;
+
+internal sealed class AccountingClient(HttpClient http) : IAccountingClient
+{
+    private sealed record CreateAccountingInvoiceRequest(
+        Guid ExternalCustomerId, int Tag, decimal Amount, string Currency, DateTimeOffset OccurredAt);
+
+    public async Task CreateDepositAsync(
+        Guid externalCustomerId,
+        decimal amount,
+        string currency,
+        DateTimeOffset occurredAt,
+        string? idempotencyKey,
+        CancellationToken ct)
+    {
+        var body = new CreateAccountingInvoiceRequest(
+            ExternalCustomerId: externalCustomerId,
+            Tag: 1,                       // deposit
+            Amount: amount,
+            Currency: currency,
+            OccurredAt: occurredAt
+        );
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, "api/v1/invoices")
+        {
+            Content = JsonContent.Create(body)
+        };
+
+        if (!string.IsNullOrWhiteSpace(idempotencyKey))
+            req.Headers.TryAddWithoutValidation("Idempotency-Key", idempotencyKey);
+
+        using var res = await http.SendAsync(req, ct);
+        res.EnsureSuccessStatusCode();
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Http\NobitexClient.cs ===
+using System.Text.Json;
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Application.Common; // <-- use AssetMapper
+using GatewayService.AccountCharge.Application.DTOs;
+using GatewayService.AccountCharge.Infrastructure.Options;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using System.Net.Http.Json;
+
+namespace GatewayService.AccountCharge.Infrastructure.Http;
+
+
+public sealed class NobitexClient : INobitexClient
+{
+    private readonly HttpClient _http;
+    private readonly ILogger<NobitexClient> _log;
+    private readonly NobitexOptionsConfig _cfg;
+
+    public NobitexClient(HttpClient http, IOptions<NobitexOptionsConfig> cfg, ILogger<NobitexClient> log)
+    {
+        _http = http;
+        _cfg = cfg.Value;
+        _log = log;
+    }
+
+    public async Task<IReadOnlyList<WalletDto>> GetWalletsAsync(CancellationToken ct)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, "/users/wallets/list");
+        using var res = await _http.SendAsync(req, ct);
+        await EnsureSuccessWithRateNotes(res, ct);
+
+        var json = await res.Content.ReadAsStringAsync(ct);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        if (!IsOk(root))
+        {
+            var (code, message) = ReadError(root);
+            _log.LogWarning("Nobitex wallets/list failed. code={Code}, message={Message}, body={Body}", code, message, json);
+            throw new InvalidOperationException($"Nobitex wallets/list failed: code={code}, message={message}");
+        }
+
+        var list = new List<WalletDto>();
+        if (root.TryGetProperty("wallets", out var wallets) && wallets.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var w in wallets.EnumerateArray())
+            {
+                var id = ReadIntFlexible(w, "id");
+                if (id == 0) id = ReadIntFlexible(w, "wallet");
+
+                // Keep lower-case for provider interactions; map to symbol only when building domain DTOs.
+                var currencyLower = (ReadString(w, "currency") ?? string.Empty).Trim().ToLowerInvariant();
+
+                string? network = null;
+                string? depAddr = null;
+                string? depTag = null;
+
+                if (w.TryGetProperty("depositInfo", out var dep) && dep.ValueKind == JsonValueKind.Object)
+                {
+                    depAddr = ReadString(dep, "address");
+                    depTag = ReadString(dep, "tag") ?? ReadString(dep, "memo") ?? ReadString(dep, "destinationTag");
+                    network = ReadString(dep, "network");
+                }
+
+                list.Add(new WalletDto
+                {
+                    Id = id,
+                    Currency = currencyLower, // keep as-is for downstream provider calls
+                    Network = network,
+                    HasDepositAddress = !string.IsNullOrWhiteSpace(depAddr),
+                    DepositAddress = string.IsNullOrWhiteSpace(depAddr) ? null : depAddr!.Trim(),
+                    DepositTag = string.IsNullOrWhiteSpace(depTag) ? null : depTag!.Trim()
+                });
+            }
+        }
+
+        return list;
+    }
+
+    public async Task<GeneratedAddressDto> GenerateAddressAsync(string currency, string? network, CancellationToken ct)
+    {
+        var currencyLower = (currency ?? string.Empty).Trim().ToLowerInvariant();
+        var networkPayload = string.IsNullOrWhiteSpace(network) ? null : network.Trim();
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["currency"] = currencyLower,
+            ["network"] = networkPayload
+        };
+
+        using var req = new HttpRequestMessage(HttpMethod.Post, "/users/wallets/generate-address")
+        {
+            Content = JsonContent.Create(payload)
+        };
+
+        using var res = await _http.SendAsync(req, ct);
+        await EnsureSuccessWithRateNotes(res, ct);
+
+        var json = await res.Content.ReadAsStringAsync(ct);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        if (!IsOk(root))
+        {
+            var (code, message) = ReadError(root);
+            _log.LogWarning("Nobitex generate-address failed. code={Code}, message={Message}, body={Body}", code, message, json);
+            throw new InvalidOperationException($"Nobitex generate-address failed: code={code}, message={message}");
+        }
+
+        var address = ReadString(root, "address") ?? ReadString(root, "depositAddress");
+        var tag = ReadString(root, "memo") ?? ReadString(root, "destinationTag") ?? ReadString(root, "tag");
+        if (string.IsNullOrWhiteSpace(address))
+        {
+            _log.LogError("Nobitex generate-address returned ok but no address. body={Body}", json);
+            throw new InvalidOperationException("Nobitex did not return a deposit address.");
+        }
+
+        var walletId = ReadIntFlexible(root, "walletId");
+        if (walletId == 0) walletId = ReadIntFlexible(root, "wallet");
+
+        return new GeneratedAddressDto
+        {
+            WalletId = walletId,
+            Currency = currencyLower,                     // provider case
+            Network = networkPayload,                    // as requested
+            Address = address.Trim(),
+            Tag = string.IsNullOrWhiteSpace(tag) ? null : tag.Trim(),
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+    }
+
+    public async Task<IReadOnlyList<IncomingDepositDto>> GetRecentDepositsAsync(int walletId, int limit, DateTimeOffset? since, CancellationToken ct)
+    {
+        var url = $"/users/wallets/deposits/list?wallet={walletId}&limit={limit}";
+        if (since.HasValue)
+            url += $"&startDate={Uri.EscapeDataString(since.Value.UtcDateTime.ToString("o"))}";
+
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        using var res = await _http.SendAsync(req, ct);
+        await EnsureSuccessWithRateNotes(res, ct);
+
+        var json = await res.Content.ReadAsStringAsync(ct);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        if (!IsOk(root))
+        {
+            var (code, message) = ReadError(root);
+            _log.LogWarning("Nobitex deposits/list failed. code={Code}, message={Message}, body={Body}", code, message, json);
+            throw new InvalidOperationException($"Nobitex deposits/list failed: code={code}, message={message}");
+        }
+
+        var list = new List<IncomingDepositDto>();
+        if (root.TryGetProperty("deposits", out var arr) && arr.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var d in arr.EnumerateArray())
+            {
+                var txHash = ReadString(d, "txHash") ?? ReadString(d, "txid") ?? string.Empty;
+                var address = ReadString(d, "address") ?? string.Empty;
+                var memo = ReadString(d, "memo") ?? ReadString(d, "destinationTag") ?? ReadString(d, "tag");
+                var symbol = ReadString(d, "currencySymbol");
+                var name = ReadString(d, "currency");
+                var currency = AssetMapper.NormalizeCurrencyFromProvider(symbol, name); // <-- key change
+
+                // network may be absent on deposits; try field, else infer from explorer URL
+                var networkRaw = ReadString(d, "network");
+                var explorerUrl = ReadString(d, "blockchainUrl");
+                var network = AssetMapper.NormalizeNetwork(networkRaw) ?? AssetMapper.InferNetworkFromUrl(explorerUrl);
+
+                var amt = ReadDecimalFlexible(d, "amount");
+                var conf = ReadIntFlexible(d, "confirmations");
+                var reqConf = ReadIntFlexible(d, "requiredConfirmations");
+
+                // Prefer 'date'; fallback to nested 'transaction.created_at'
+                var created =
+                    ReadDateTimeOffsetFlexible(d, "date") ??
+                    ReadDateTimeOffsetFlexibleNested(d, "transaction", "created_at") ??
+                    ReadDateTimeOffsetFlexible(d, "created_at") ??
+                    DateTimeOffset.UtcNow;
+
+                // Prefer explicit confirmed flag: isConfirmed/confirmed/wasConfirmed
+                var confirmed =
+                    ReadBoolFlexible(d, "isConfirmed")
+                    ?? ReadBoolFlexible(d, "confirmed")
+                    ?? ReadBoolFlexible(d, "wasConfirmed")
+                    ?? (reqConf > 0 ? conf >= reqConf : conf > 0);
+
+                list.Add(new IncomingDepositDto
+                {
+                    WalletId = walletId,
+                    Address = address,
+                    Tag = string.IsNullOrWhiteSpace(memo) ? null : memo,
+                    TxHash = txHash,
+                    Amount = amt,
+                    Currency = currency,   // <-- canonical symbol (e.g., "BNB")
+                    Network = network,    // normalized or null
+                    Confirmations = conf,
+                    RequiredConfirmations = reqConf,
+                    CreatedAt = created,
+                    Confirmed = confirmed
+                });
+            }
+        }
+
+        return list;
+    }
+
+    // -----------------------
+    // Helpers
+    // -----------------------
+
+    private static bool IsOk(JsonElement root)
+    {
+        var status = ReadString(root, "status");
+        return string.Equals(status, "ok", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static (string? code, string? message) ReadError(JsonElement root)
+    {
+        var code = ReadString(root, "code");
+        var msg = ReadString(root, "message");
+        return (code, msg);
+    }
+
+    private static string? ReadString(JsonElement e, string name)
+        => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static string? ReadNestedString(JsonElement e, string parent, string child)
+        => e.TryGetProperty(parent, out var p) && p.ValueKind == JsonValueKind.Object
+           && p.TryGetProperty(child, out var c) && c.ValueKind == JsonValueKind.String
+                ? c.GetString()
+                : null;
+
+    private static int ReadIntFlexible(JsonElement e, string name)
+    {
+        if (!e.TryGetProperty(name, out var v)) return 0;
+        if (v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var i)) return i;
+        if (v.ValueKind == JsonValueKind.String && int.TryParse(v.GetString(), out var si)) return si;
+        return 0;
+    }
+
+    private static decimal ReadDecimalFlexible(JsonElement e, string name)
+    {
+        if (!e.TryGetProperty(name, out var v)) return 0m;
+        if (v.ValueKind == JsonValueKind.Number && v.TryGetDecimal(out var d)) return d;
+        if (v.ValueKind == JsonValueKind.String && decimal.TryParse(v.GetString(), out var sd)) return sd;
+        return 0m;
+    }
+
+    private static DateTimeOffset? ReadDateTimeOffsetFlexible(JsonElement e, string name)
+    {
+        if (!e.TryGetProperty(name, out var v)) return null;
+        if (v.ValueKind == JsonValueKind.String && DateTimeOffset.TryParse(v.GetString(), out var dto)) return dto;
+        if (v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var unixMs)) return DateTimeOffset.FromUnixTimeMilliseconds(unixMs);
+        return null;
+    }
+
+    private static DateTimeOffset? ReadDateTimeOffsetFlexibleNested(JsonElement e, string parent, string child)
+    {
+        var s = ReadNestedString(e, parent, child);
+        if (s is null) return null;
+        return DateTimeOffset.TryParse(s, out var dto) ? dto : (DateTimeOffset?)null;
+    }
+
+    private static bool? ReadBoolFlexible(JsonElement e, string name)
+    {
+        if (!e.TryGetProperty(name, out var v)) return null;
+        return v.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.String => bool.TryParse(v.GetString(), out var b) ? b : null,
+            JsonValueKind.Number => v.TryGetInt32(out var i) ? i != 0 : (bool?)null,
+            _ => null
+        };
+    }
+
+    private async Task EnsureSuccessWithRateNotes(HttpResponseMessage res, CancellationToken ct)
+    {
+        if ((int)res.StatusCode == 429)
+        {
+            var retryAfter = res.Headers.RetryAfter?.Delta ?? TimeSpan.Zero;
+            _log.LogWarning("Nobitex 429 TooManyRequests. Retry-After: {RetryAfter}", retryAfter);
+        }
+
+        if (!res.IsSuccessStatusCode)
+        {
+            var body = await res.Content.ReadAsStringAsync(ct);
+            _log.LogError("Nobitex HTTP error {Status}: {Body}", (int)res.StatusCode, body);
+            res.EnsureSuccessStatusCode();
+        }
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Options\AccountingOptionsConfig.cs ===
+// D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Options\AccountingOptionsConfig.cs
+namespace GatewayService.AccountCharge.Infrastructure.Options;
+
+public sealed class AccountingOptionsConfig
+{
+    public const string SectionName = "Accounting";
+    public string? BaseUrl { get; set; }
+    public string? ApiKey { get; set; }          // optional
+    public string? UserAgent { get; set; } = "TraderBot/GatewayService.AccountCharge";
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Options\NobitexOptions.cs ===
+namespace GatewayService.AccountCharge.Infrastructure.Options;
+
+public sealed class NobitexOptionsConfig
+{
+    public const string SectionName = "Nobitex";
+    public string? BaseUrl { get; set; }
+    public string? UserAgent { get; set; }
+    public string? Token { get; set; }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Options\PaymentMatchingOptionsConfig.cs ===
+namespace GatewayService.AccountCharge.Infrastructure.Options;
+
+public sealed class PaymentMatchingOptionsConfig
+{
+    public int DefaultMinConfirmations { get; set; } = 1;
+    public decimal DefaultAbsoluteTolerance { get; set; } = 0m;
+    public decimal DefaultPercentageTolerance { get; set; } = 0m;
+    public bool DefaultRequireKnownAddress { get; set; } = true;
+    public bool DefaultAllowMultipleDeposits { get; set; } = true;
+
+    // key: "usdt:TRC20", "btc:BTC", etc.
+    public Dictionary<string, PerNetwork>? Networks { get; set; }
+}
+
+public sealed class PerNetwork
+{
+    public int? MinConfirmations { get; set; }
+    public decimal? AbsoluteTolerance { get; set; }
+    public decimal? PercentageTolerance { get; set; }
+    public bool? RequireKnownAddress { get; set; }
+    public bool? AllowMultipleDeposits { get; set; }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Persistence\Configurations\InvoiceConfiguration.cs ===
+using GatewayService.AccountCharge.Domain.Invoices;
+using GatewayService.AccountCharge.Domain.ValueObjects;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+namespace GatewayService.AccountCharge.Infrastructure.Persistence.Configurations;
+
+public sealed class InvoiceConfiguration : IEntityTypeConfiguration<Invoice>
+{
+    public void Configure(EntityTypeBuilder<Invoice> b)
+    {
+        b.ToTable("Invoices");
+        b.HasKey(x => x.Id);
+
+        // Invoice root
+        b.Property(x => x.Id).ValueGeneratedNever();
+
+        b.Property(x => x.InvoiceNumber)
+            .IsRequired()
+            .HasMaxLength(64);
+        b.HasIndex(x => x.InvoiceNumber).IsUnique();
+
+        b.Property(x => x.CustomerId).HasMaxLength(64);
+        b.HasIndex(x => x.CustomerId);
+
+        b.Property(x => x.Status)
+            .HasConversion<string>()
+            .HasMaxLength(32)
+            .IsRequired();
+
+        b.Property(x => x.CreatedAt).IsRequired();
+        b.Property(x => x.ExpiresAt);
+
+        // ExpectedAmount (Money VO)
+        b.OwnsOne(x => x.ExpectedAmount, money =>
+        {
+            money.Property(m => m.Amount)
+                 .HasColumnName("ExpectedAmount")
+                 .HasColumnType("decimal(38, 18)")
+                 .IsRequired();
+
+            money.Property(m => m.Currency)
+                 .HasColumnName("ExpectedCurrency")
+                 .HasMaxLength(16)
+                 .IsRequired();
+        });
+
+        // Read-model/projection properties (not persisted)
+        b.Ignore(x => x.TotalPaid);
+        b.Ignore(x => x.Payments);
+
+        // -----------------------------
+        // InvoiceAddresses (owned collection)
+        // -----------------------------
+        b.OwnsMany(x => x.Addresses, nav =>
+        {
+            nav.ToTable("InvoiceAddresses");
+
+            nav.WithOwner().HasForeignKey(a => a.InvoiceId);
+
+            nav.HasKey(a => a.Id);
+            nav.Property(a => a.Id).ValueGeneratedNever(); // client-generated Guid
+
+            nav.Property(a => a.InvoiceId).HasColumnName("InvoiceId").IsRequired();
+
+            nav.Property(a => a.WalletId).HasColumnName("WalletId").IsRequired();
+            nav.Property(a => a.Currency).HasColumnName("WalletCurrency").HasMaxLength(16).IsRequired();
+            nav.Property(a => a.Address).HasColumnName("DepositAddress").HasMaxLength(256).IsRequired();
+            nav.Property(a => a.Network).HasColumnName("DepositNetwork").HasMaxLength(32);
+            nav.Property(a => a.Tag).HasColumnName("DepositTag").HasMaxLength(128);
+            nav.Property(a => a.CreatedAt).HasColumnName("CreatedAt").IsRequired();
+
+            nav.HasIndex(a => a.InvoiceId);
+            nav.HasIndex(a => a.CreatedAt);
+
+            nav.HasIndex(a => new { a.InvoiceId, a.Address, a.Network, a.Tag, a.WalletId }).IsUnique();
+        });
+
+        // ------------------------------------
+        // InvoiceAppliedDeposits (owned collection)
+        // ------------------------------------
+        b.OwnsMany(x => x.AppliedDeposits, nav =>
+        {
+            nav.ToTable("InvoiceAppliedDeposits");
+
+            nav.WithOwner().HasForeignKey(d => d.InvoiceId);
+
+            nav.HasKey(d => d.Id);
+            nav.Property(d => d.Id).ValueGeneratedNever();
+
+            nav.Property(d => d.ObservedAt).IsRequired();
+            nav.Property(d => d.WasConfirmed).IsRequired();
+            nav.Property(d => d.Confirmations).IsRequired();
+            nav.Property(d => d.RequiredConfirmations).IsRequired();
+
+            // ✅ TransactionHash به‌صورت اسکالر (با کانورتر) روی ستون TxHash ذخیره می‌شود
+            nav.Property(d => d.TxHash)
+               .HasConversion(
+                    toProvider => toProvider.Value,                // TransactionHash -> string
+                    fromProvider => new TransactionHash(fromProvider) // string -> TransactionHash
+                )
+               .HasColumnName("TxHash")
+               .HasMaxLength(128)
+               .IsRequired();
+
+            // 👇 ایندکس یکتا روی InvoiceId + TxHash (دوباره‌اعمال نشدن یک Tx برای یک اینوویس)
+            nav.HasIndex(d => new { d.InvoiceId, d.TxHash }).IsUnique();
+
+            // Infrastructure/Persistence/Configurations/InvoiceConfiguration.cs
+            nav.OwnsOne(d => d.Address, addr =>
+            {
+                addr.Property(x => x.Address)
+                    .HasColumnName("DepositAddress")
+                    .HasMaxLength(128)
+                    .IsRequired();
+
+                addr.Property(x => x.Network)
+                    .HasColumnName("DepositNetwork")
+                    .HasMaxLength(32);                // <-- remove .IsRequired()
+
+                addr.Property(x => x.Tag)
+                    .HasColumnName("DepositTag")
+                    .HasMaxLength(128);
+            });
+
+            // Money VO
+            nav.OwnsOne(d => d.Amount, money =>
+            {
+                money.Property(m => m.Amount)
+                     .HasColumnName("Amount")
+                     .HasColumnType("decimal(38, 18)")
+                     .IsRequired();
+
+                money.Property(m => m.Currency)
+                     .HasColumnName("Currency")
+                     .HasMaxLength(16)
+                     .IsRequired();
+            });
+
+            nav.HasIndex(d => d.InvoiceId);
+            nav.HasIndex(d => d.ObservedAt);
+        });
+
+        // Backing-field access
+        b.Navigation(x => x.Addresses).UsePropertyAccessMode(PropertyAccessMode.Field);
+        b.Navigation(x => x.AppliedDeposits).UsePropertyAccessMode(PropertyAccessMode.Field);
+
+        // Root helpful indexes
+        b.HasIndex(x => x.CreatedAt);
+        b.HasIndex(x => x.Status);
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Persistence\AccountChargeDb.cs ===
+using Microsoft.EntityFrameworkCore;
+
+namespace GatewayService.AccountCharge.Infrastructure.Persistence;
+
+/// <summary>
+/// EF Core DbContext wired to Domain aggregates (persistence-ignorant).
+/// </summary>
+public sealed class AccountChargeDb : DbContext
+{
+    public AccountChargeDb(DbContextOptions<AccountChargeDb> options) : base(options) { }
+
+    // Aggregates
+    public DbSet<Domain.Invoices.Invoice> Invoices => Set<Domain.Invoices.Invoice>();
+
+    protected override void OnModelCreating(ModelBuilder modelBuilder)
+    {
+        modelBuilder.ApplyConfigurationsFromAssembly(typeof(AccountChargeDb).Assembly);
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Persistence\AccountChargeDbContextFactory.cs ===
+using System;
+using System.IO;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Design;
+using Microsoft.Extensions.Configuration;
+
+namespace GatewayService.AccountCharge.Infrastructure.Persistence
+{
+    // Match your actual DbContext type name from the error: AccountChargeDb
+    public sealed class AccountChargeDbFactory : IDesignTimeDbContextFactory<AccountChargeDb>
+    {
+        public AccountChargeDb CreateDbContext(string[] args)
+        {
+            // Resolve configuration from multiple possible locations
+            var env = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Development";
+            var basePath = Directory.GetCurrentDirectory(); // Infrastructure project folder
+            var apiDir = Path.GetFullPath(Path.Combine(basePath, "..", "GatewayService.AccountCharge.Api"));
+
+            var cb = new ConfigurationBuilder()
+                .SetBasePath(basePath)
+                .AddJsonFile("appsettings.json", optional: true)
+                .AddJsonFile($"appsettings.{env}.json", optional: true)
+                .AddEnvironmentVariables();
+
+            // Also try to read appsettings from the API project (common setup)
+            if (Directory.Exists(apiDir))
+            {
+                cb.AddJsonFile(Path.Combine(apiDir, "appsettings.json"), optional: true)
+                  .AddJsonFile(Path.Combine(apiDir, $"appsettings.{env}.json"), optional: true);
+            }
+
+            var config = cb.Build();
+
+            var conn = config.GetConnectionString("AccountChargeDb")
+                ?? "Server=DESKTOP-B95G2DP;Database=AccountChargeDb;Trusted_Connection=True;TrustServerCertificate=True;";
+
+            var opts = new DbContextOptionsBuilder<AccountChargeDb>()
+                .UseSqlServer(conn)
+                .Options;
+
+            return new AccountChargeDb(opts);
+        }
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Persistence\UnitOfWork.cs ===
+using GatewayService.AccountCharge.Application.Abstractions;
+
+namespace GatewayService.AccountCharge.Infrastructure.Persistence;
+
+public sealed class UnitOfWork : IUnitOfWork
+{
+    private readonly AccountChargeDb _db;
+
+    public UnitOfWork(AccountChargeDb db) => _db = db;
+
+    public Task<int> SaveChangesAsync(CancellationToken ct = default)
+        => _db.SaveChangesAsync(ct);
+
+    public void ClearChangeTracker()
+       => _db.ChangeTracker.Clear();   
+}
+
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Providers\ConfigPaymentMatchingOptionsProvider.cs ===
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Domain.Invoices;
+using Microsoft.Extensions.Options;
+
+namespace GatewayService.AccountCharge.Infrastructure.Providers;
+
+public sealed class ConfigPaymentMatchingOptionsProvider : IPaymentMatchingOptionsProvider
+{
+    private readonly Options.PaymentMatchingOptionsConfig _cfg;
+
+    public ConfigPaymentMatchingOptionsProvider(IOptions<Options.PaymentMatchingOptionsConfig> cfg)
+        => _cfg = cfg.Value;
+
+    public PaymentMatchingOptions Get(string currency, string network)
+    {
+        var key = $"{currency?.ToLowerInvariant()}:{network?.ToUpperInvariant()}";
+
+        // per-network overrides if present
+        if (_cfg.Networks is not null && _cfg.Networks.TryGetValue(key, out var per))
+        {
+            return new PaymentMatchingOptions
+            {
+                MinConfirmations = per.MinConfirmations ?? _cfg.DefaultMinConfirmations,
+                AbsoluteTolerance = per.AbsoluteTolerance ?? _cfg.DefaultAbsoluteTolerance,
+                PercentageTolerance = per.PercentageTolerance ?? _cfg.DefaultPercentageTolerance,
+                RequireKnownAddress = per.RequireKnownAddress ?? _cfg.DefaultRequireKnownAddress,
+                AllowMultipleDeposits = per.AllowMultipleDeposits ?? _cfg.DefaultAllowMultipleDeposits,
+            };
+        }
+
+        // fallbacks
+        return new PaymentMatchingOptions
+        {
+            MinConfirmations = _cfg.DefaultMinConfirmations,
+            AbsoluteTolerance = _cfg.DefaultAbsoluteTolerance,
+            PercentageTolerance = _cfg.DefaultPercentageTolerance,
+            RequireKnownAddress = _cfg.DefaultRequireKnownAddress,
+            AllowMultipleDeposits = _cfg.DefaultAllowMultipleDeposits,
+        };
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Repositories\EfInvoiceRepository.cs ===
+using System;
+using System.Linq;
+using System.Linq.Expressions;
+using GatewayService.AccountCharge.Domain.Invoices;
+using GatewayService.AccountCharge.Domain.Repositories;
+using GatewayService.AccountCharge.Domain.ValueObjects;
+using Microsoft.EntityFrameworkCore;
+
+namespace GatewayService.AccountCharge.Infrastructure.Repositories;
+
+public sealed class EfInvoiceRepository : IInvoiceRepository
+{
+    private readonly Persistence.AccountChargeDb _db;
+
+    public EfInvoiceRepository(Persistence.AccountChargeDb db) => _db = db;
+
+    public async Task AddAsync(Invoice invoice, CancellationToken ct = default)
+        => await _db.Invoices.AddAsync(invoice, ct);
+
+    public Task UpdateAsync(Invoice invoice, CancellationToken ct = default)
+    {
+        var entry = _db.Entry(invoice);
+        if (entry.State == EntityState.Detached)
+        {
+            _db.Invoices.Attach(invoice);
+        }
+        return Task.CompletedTask;
+    }
+
+    public async Task<Invoice?> GetByIdAsync(Guid id, CancellationToken ct = default)
+    {
+        return await _db.Invoices
+            .AsTracking()
+            .Include(i => i.Addresses)
+            .Include(i => i.AppliedDeposits)
+            .FirstOrDefaultAsync(i => i.Id == id, ct);
+    }
+
+    public async Task<Invoice?> GetByNumberAsync(string invoiceNumber, CancellationToken ct = default)
+    {
+        return await _db.Invoices
+            .AsNoTracking()
+            .Include(i => i.Addresses)
+            .Include(i => i.AppliedDeposits)
+            .FirstOrDefaultAsync(i => i.InvoiceNumber == invoiceNumber, ct);
+    }
+
+    // ⚠️ Legacy path (not used in new TxHash-claim flow)
+    public async Task<Invoice?> GetByAddressAsync(ChainAddress chainAddress, CancellationToken ct = default)
+    {
+        var addr = chainAddress.Address.ToLower();
+        var net = (chainAddress.Network ?? string.Empty).ToLower();
+        var tag = chainAddress.Tag;
+
+        var invoiceId = await _db.Invoices
+            .AsNoTracking()
+            .SelectMany(i => i.Addresses, (i, a) => new { i.Id, a })
+            .Where(x =>
+                x.a.Address.ToLower() == addr &&
+                (string.IsNullOrEmpty(net) || (x.a.Network ?? "").ToLower() == net) &&
+                ((x.a.Tag == null && tag == null) || x.a.Tag == tag))
+            .OrderByDescending(x => x.Id) // harmless tie-breaker
+            .Select(x => x.Id)
+            .FirstOrDefaultAsync(ct);
+
+        if (invoiceId == Guid.Empty)
+            return null;
+
+        var tracked = _db.ChangeTracker.Entries<Invoice>().FirstOrDefault(e => e.Entity.Id == invoiceId);
+        if (tracked is not null) tracked.State = EntityState.Detached;
+
+        return await _db.Invoices
+            .AsTracking()
+            .Include(i => i.Addresses)
+            .Include(i => i.AppliedDeposits)
+            .FirstOrDefaultAsync(i => i.Id == invoiceId, ct);
+    }
+
+    public async Task<bool> HasAppliedDepositAsync(Guid invoiceId, string txHash, CancellationToken ct = default)
+    {
+        var th = new TransactionHash(txHash);
+        return await _db.Invoices
+            .AsNoTracking()
+            .Where(i => i.Id == invoiceId)
+            .SelectMany(i => i.AppliedDeposits.Where(d => d.TxHash == th))
+            .AnyAsync(ct);
+    }
+
+    // ✅ Global TxHash check
+    public async Task<bool> HasAnyAppliedDepositAsync(string txHash, CancellationToken ct = default)
+    {
+        var th = new TransactionHash(txHash);
+        return await _db.Invoices
+            .AsNoTracking()
+            .SelectMany(i => i.AppliedDeposits)
+            .AnyAsync(d => d.TxHash == th, ct);
+    }
+
+    public async Task<bool> ExistsAsync(Expression<Func<Invoice, bool>> predicate, CancellationToken ct = default)
+        => await _db.Invoices.AnyAsync(predicate, ct);
+
+
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Services\DateTicksInvoiceNumberGenerator.cs ===
+using GatewayService.AccountCharge.Application.Abstractions;
+
+namespace GatewayService.AccountCharge.Infrastructure.Services;
+
+public sealed class DateTicksInvoiceNumberGenerator : IInvoiceNumberGenerator
+{
+    public string Next()
+    {
+        // Example: INV-2025-09-17-638...-XYZ
+        var now = DateTime.UtcNow;
+        var suffix = Guid.NewGuid().ToString("N")[..6].ToUpperInvariant();
+        return $"INV-{now:yyyyMMdd}-{now.Ticks}-{suffix}";
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\AccountingRegistration.cs ===
+// D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\AccountingRegistration.cs
+using System.Net.Http.Headers;
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Infrastructure.Http;
+using GatewayService.AccountCharge.Infrastructure.Options;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+
+namespace GatewayService.AccountCharge.Infrastructure;
+
+public static class AccountingRegistration
+{
+    public static IServiceCollection AddAccountingHttp(this IServiceCollection services, IConfiguration config)
+    {
+        services.AddOptions<AccountingOptionsConfig>()
+                .Bind(config.GetSection(AccountingOptionsConfig.SectionName))
+                .Validate(o => !string.IsNullOrWhiteSpace(o.BaseUrl), "Accounting:BaseUrl is required");
+
+        services.AddHttpClient<IAccountingClient, AccountingClient>((sp, http) =>
+        {
+            var opt = sp.GetRequiredService<IOptions<AccountingOptionsConfig>>().Value;
+            http.BaseAddress = new Uri(opt.BaseUrl!);
+
+            http.DefaultRequestHeaders.UserAgent.Clear();
+            http.DefaultRequestHeaders.UserAgent.ParseAdd(opt.UserAgent ?? "TraderBot/GatewayService.AccountCharge");
+
+            http.DefaultRequestHeaders.Accept.Clear();
+            http.DefaultRequestHeaders.Accept.ParseAdd("application/json");
+
+            if (!string.IsNullOrWhiteSpace(opt.ApiKey))
+                http.DefaultRequestHeaders.TryAddWithoutValidation("X-Api-Key", opt.ApiKey);
+        });
+
+        return services;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\DependencyInjection.cs ===
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Application.Commands.CreateInvoice;
+using GatewayService.AccountCharge.Application.Services;
+using GatewayService.AccountCharge.Infrastructure.Background;
+using GatewayService.AccountCharge.Infrastructure.Http;
+using GatewayService.AccountCharge.Infrastructure.Options;
+using GatewayService.AccountCharge.Infrastructure.Persistence;
+using GatewayService.AccountCharge.Infrastructure.Providers;
+using GatewayService.AccountCharge.Infrastructure.Repositories;
+using GatewayService.AccountCharge.Infrastructure.Services;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace GatewayService.AccountCharge.Infrastructure;
+
+public static class DependencyInjection
+{
+    // ⚠️ This AddApplication() really belongs in the Application project/namespace.
+    public static IServiceCollection AddApplication(this IServiceCollection services)
+    {
+        services.AddMediatR(cfg =>
+        {
+            cfg.RegisterServicesFromAssembly(typeof(CreateInvoiceHandler).Assembly);
+        });
+
+        return services;
+    }
+
+    public static IServiceCollection AddInfrastructure(
+        this IServiceCollection services, IConfiguration configuration)
+    {
+        // DbContext
+        var cs = configuration.GetConnectionString("AccountChargeDb")
+                 ?? throw new InvalidOperationException("Missing connection string 'AccountChargeDb'");
+        services.AddDbContext<AccountChargeDb>(opt =>
+           opt.UseSqlServer(cs)
+              .EnableSensitiveDataLogging()      // نمایش مقادیر پارامترها
+              .EnableDetailedErrors()            // جزئیات بیشتر برای خطاها
+              .LogTo(Console.WriteLine,          // مقصد لاگ (می‌تونی لاگر هم بذاری)
+                  new[]
+                  {
+                   Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.CommandExecuting,
+                   Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.CommandExecuted,
+                   Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.ContextDisposed,
+                   Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.SaveChangesStarting,
+                   Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.SaveChangesCompleted
+                  },
+                  Microsoft.Extensions.Logging.LogLevel.Information,
+                  DbContextLoggerOptions.SingleLine | DbContextLoggerOptions.UtcTime // آپشن‌های اضافی برای خوانایی
+              )
+       );
+
+        // UoW & Repositories
+        services.AddScoped<IUnitOfWork, UnitOfWork>();
+        services.AddScoped<Domain.Repositories.IInvoiceRepository, EfInvoiceRepository>();
+
+        // Options (Payment Matching only; Nobitex is bound/validated inside AddNobitexHttp)
+        services.Configure<PaymentMatchingOptionsConfig>(configuration.GetSection("PaymentMatching"));
+
+        // HttpClient (Typed) with base address, UA, and Token header
+        services.AddNobitexHttp(configuration);
+        services.AddAccountingHttp(configuration);   // ✅ merged in here
+
+        // Providers / Generators
+        services.AddScoped<IPaymentMatchingOptionsProvider, ConfigPaymentMatchingOptionsProvider>();
+        services.AddScoped<IInvoiceNumberGenerator, DateTicksInvoiceNumberGenerator>();
+
+        // Orchestrator (SCOPED) – used by controllers and background job
+        services.AddScoped<DepositMatchingOrchestrator>(); // from Application.Services
+
+        // Background polling (Singleton IHostedService)
+        var enablePolling = configuration.GetValue<bool?>("Nobitex:EnablePolling") ?? true;
+        if (enablePolling)
+        {
+            services.AddHostedService<NobitexPollingService>();
+        }
+
+        return services;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\NobitexRegistration.cs ===
+using System.Net.Http.Headers;
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Infrastructure.Http;
+using GatewayService.AccountCharge.Infrastructure.Options;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+
+namespace GatewayService.AccountCharge.Infrastructure;
+
+public static class NobitexRegistration
+{
+    public static IServiceCollection AddNobitexHttp(this IServiceCollection services, IConfiguration config)
+    {
+        services.AddOptions<NobitexOptionsConfig>()
+                .Bind(config.GetSection(NobitexOptionsConfig.SectionName))
+                .Validate(o => !string.IsNullOrWhiteSpace(o.BaseUrl), "Nobitex:BaseUrl is required");
+
+        services.AddHttpClient<INobitexClient, NobitexClient>((sp, http) =>
+        {
+            var opt = sp.GetRequiredService<IOptions<NobitexOptionsConfig>>().Value;
+            http.BaseAddress = new Uri(opt.BaseUrl!);
+            http.DefaultRequestHeaders.UserAgent.Clear();
+            http.DefaultRequestHeaders.UserAgent.ParseAdd(opt.UserAgent ?? "TraderBot/GatewayService");
+
+            var token = opt.Token ?? Environment.GetEnvironmentVariable("NOBITEX_API_TOKEN");
+            if (string.IsNullOrWhiteSpace(token))
+                throw new InvalidOperationException("Nobitex API Token is missing.");
+            http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Token", token);
+
+            // Optional: Accept JSON
+            http.DefaultRequestHeaders.Accept.Clear();
+            http.DefaultRequestHeaders.Accept.ParseAdd("application/json");
+        });
+
+        return services;
+    }
+}
+
