@@ -132,41 +132,41 @@ public sealed class InvoicesController : ControllerBase
 
     // ===== New endpoints =====
 
-    public sealed class GenerateAddressRequest
-    {
-        public string Currency { get; set; } = default!;
-        public string? Network { get; set; }
-    }
+    //public sealed class GenerateAddressRequest
+    //{
+    //    public string Currency { get; set; } = default!;
+    //    public string? Network { get; set; }
+    //}
 
-    /// <summary>Generate/attach a deposit address for an invoice by Id.</summary>
-    [HttpPost("{id:guid}/address")]
-    [Consumes("application/json")]
-    [Produces("application/json")]
-    [ProducesResponseType(typeof(GeneratedAddressResult), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    public async Task<ActionResult<GeneratedAddressResult>> GenerateAddress(
-        [FromRoute] Guid id,
-        [FromBody] GenerateAddressRequest req,
-        CancellationToken ct)
-    {
-        try
-        {
-            var result = await _sender.Send(
-                new GenerateAndAttachAddressToInvoiceCommand(id, req.Currency, req.Network),
-                ct);
+    ///// <summary>Generate/attach a deposit address for an invoice by Id.</summary>
+    //[HttpPost("{id:guid}/address")]
+    //[Consumes("application/json")]
+    //[Produces("application/json")]
+    //[ProducesResponseType(typeof(GeneratedAddressResult), StatusCodes.Status200OK)]
+    //[ProducesResponseType(StatusCodes.Status404NotFound)]
+    //[ProducesResponseType(StatusCodes.Status400BadRequest)]
+    //public async Task<ActionResult<GeneratedAddressResult>> GenerateAddress(
+    //    [FromRoute] Guid id,
+    //    [FromBody] GenerateAddressRequest req,
+    //    CancellationToken ct)
+    //{
+    //    try
+    //    {
+    //        var result = await _sender.Send(
+    //            new GenerateAndAttachAddressToInvoiceCommand(id, req.Currency, req.Network),
+    //            ct);
 
-            return Ok(result); // 200 + JSON: address, network, walletId, currency, createdAt
-        }
-        catch (KeyNotFoundException)
-        {
-            return NotFound();
-        }
-        catch (ArgumentException ex)
-        {
-            return BadRequest(new { error = ex.Message });
-        }
-    }
+    //        return Ok(result); // 200 + JSON: address, network, walletId, currency, createdAt
+    //    }
+    //    catch (KeyNotFoundException)
+    //    {
+    //        return NotFound();
+    //    }
+    //    catch (ArgumentException ex)
+    //    {
+    //        return BadRequest(new { error = ex.Message });
+    //    }
+    //}
 
     [HttpPost("{id:guid}/sync")]
     [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
