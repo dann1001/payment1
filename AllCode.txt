@@ -1,4 +1,48 @@
-﻿=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Api\Controllers\InvoicesController.cs ===
+﻿=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Api\Controllers\DepositAddressesController.cs ===
+// File: Api/Controllers/DepositsController.cs
+using GatewayService.AccountCharge.Application.Commands.Deposits;
+using GatewayService.AccountCharge.Application.Contracts.Deposits;
+using MediatR;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using System.Net;
+
+namespace GatewayService.AccountCharge.Api.Controllers;
+
+[ApiController]
+[Route("api/v1/deposits")]
+[Produces("application/json")]
+public sealed class DepositsController : ControllerBase
+{
+    private readonly ISender _sender;
+
+    public DepositsController(ISender sender)
+    {
+        _sender = sender;
+    }
+
+    /// <summary>Public endpoint to generate a new deposit address from Nobitex.</summary>
+    [HttpPost("address")]
+    [AllowAnonymous]
+    [Consumes("application/json")]
+    [ProducesResponseType(typeof(GeneratedAddressResult), (int)HttpStatusCode.OK)]
+    [ProducesResponseType((int)HttpStatusCode.BadRequest)]
+    public async Task<ActionResult<GeneratedAddressResult>> GenerateAddress(
+        [FromBody] GenerateAddressRequest req,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(req.Currency))
+            return BadRequest(new { error = "Currency is required." });
+
+        var result = await _sender.Send(
+            new GenerateAddressCommand(req.Currency, req.Network),
+            ct);
+
+        return Ok(result);
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Api\Controllers\InvoicesController.cs ===
 using System.Net.Mime;
 using System.ComponentModel.DataAnnotations;
 using Asp.Versioning;
@@ -133,41 +177,41 @@ public sealed class InvoicesController : ControllerBase
 
     // ===== New endpoints =====
 
-    public sealed class GenerateAddressRequest
-    {
-        public string Currency { get; set; } = default!;
-        public string? Network { get; set; }
-    }
+    //public sealed class GenerateAddressRequest
+    //{
+    //    public string Currency { get; set; } = default!;
+    //    public string? Network { get; set; }
+    //}
 
-    /// <summary>Generate/attach a deposit address for an invoice by Id.</summary>
-    [HttpPost("{id:guid}/address")]
-    [Consumes("application/json")]
-    [Produces("application/json")]
-    [ProducesResponseType(typeof(GeneratedAddressResult), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    public async Task<ActionResult<GeneratedAddressResult>> GenerateAddress(
-        [FromRoute] Guid id,
-        [FromBody] GenerateAddressRequest req,
-        CancellationToken ct)
-    {
-        try
-        {
-            var result = await _sender.Send(
-                new GenerateAndAttachAddressToInvoiceCommand(id, req.Currency, req.Network),
-                ct);
+    ///// <summary>Generate/attach a deposit address for an invoice by Id.</summary>
+    //[HttpPost("{id:guid}/address")]
+    //[Consumes("application/json")]
+    //[Produces("application/json")]
+    //[ProducesResponseType(typeof(GeneratedAddressResult), StatusCodes.Status200OK)]
+    //[ProducesResponseType(StatusCodes.Status404NotFound)]
+    //[ProducesResponseType(StatusCodes.Status400BadRequest)]
+    //public async Task<ActionResult<GeneratedAddressResult>> GenerateAddress(
+    //    [FromRoute] Guid id,
+    //    [FromBody] GenerateAddressRequest req,
+    //    CancellationToken ct)
+    //{
+    //    try
+    //    {
+    //        var result = await _sender.Send(
+    //            new GenerateAndAttachAddressToInvoiceCommand(id, req.Currency, req.Network),
+    //            ct);
 
-            return Ok(result); // 200 + JSON: address, network, walletId, currency, createdAt
-        }
-        catch (KeyNotFoundException)
-        {
-            return NotFound();
-        }
-        catch (ArgumentException ex)
-        {
-            return BadRequest(new { error = ex.Message });
-        }
-    }
+    //        return Ok(result); // 200 + JSON: address, network, walletId, currency, createdAt
+    //    }
+    //    catch (KeyNotFoundException)
+    //    {
+    //        return NotFound();
+    //    }
+    //    catch (ArgumentException ex)
+    //    {
+    //        return BadRequest(new { error = ex.Message });
+    //    }
+    //}
 
     [HttpPost("{id:guid}/sync")]
     [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
@@ -322,6 +366,90 @@ public sealed class InvoicesController : ControllerBase
         public int Applied { get; set; }
         public int AlreadyApplied { get; set; }
         public int Rejected { get; set; }
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Api\Controllers\PrepaidInvoicesController.cs ===
+using System.ComponentModel.DataAnnotations;
+using System.Net.Mime;
+using Asp.Versioning;
+using GatewayService.AccountCharge.Application.Commands.Prepaid;
+using GatewayService.AccountCharge.Application.DTOs;
+using GatewayService.AccountCharge.Application.Queries.Prepaid;
+using MediatR;
+using Microsoft.AspNetCore.Mvc;
+
+namespace GatewayService.AccountCharge.Api.Controllers;
+
+[ApiController]
+[ApiVersion("1.0")]
+[Route("api/v{version:apiVersion}/prepaid-invoices")]
+[Produces(MediaTypeNames.Application.Json)]
+public sealed class PrepaidInvoicesController : ControllerBase
+{
+    private readonly ISender _sender;
+    public PrepaidInvoicesController(ISender sender) => _sender = sender;
+
+    public sealed class CreateRequest
+    {
+        [Required] public string Currency { get; set; } = default!;
+        public string? Network { get; set; }           // optional
+        [Required] public string TxHash { get; set; } = default!;
+        public string? CustomerId { get; set; }
+        public DateTimeOffset? ExpiresAtUtc { get; set; }
+    }
+
+    [HttpPost]
+    [ProducesResponseType(typeof(PrepaidInvoiceDto), StatusCodes.Status201Created)]
+    public async Task<IActionResult> Create([FromBody] CreateRequest req, CancellationToken ct)
+    {
+        TimeSpan? ttl = null;
+        if (req.ExpiresAtUtc.HasValue)
+        {
+            var delta = req.ExpiresAtUtc.Value - DateTimeOffset.UtcNow;
+            if (delta > TimeSpan.Zero) ttl = delta;
+        }
+
+        var id = await _sender.Send(new CreatePrepaidInvoiceCommand(
+            Currency: req.Currency,
+            Network: req.Network,
+            TxHash: req.TxHash,
+            CustomerId: req.CustomerId,
+            Ttl: ttl
+        ), ct);
+
+        // Try immediate sync (best-effort)
+        await _sender.Send(new SyncPrepaidInvoiceCommand(id), ct);
+
+        var dto = await _sender.Send(new GetPrepaidInvoiceQuery(id), ct);
+        return CreatedAtAction(nameof(GetById), new { version = "1.0", id }, dto);
+    }
+
+    [HttpGet("{id:guid}")]
+    [ProducesResponseType(typeof(PrepaidInvoiceDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetById([FromRoute] Guid id, CancellationToken ct)
+    {
+        try
+        {
+            var dto = await _sender.Send(new GetPrepaidInvoiceQuery(id), ct);
+            return Ok(dto);
+        }
+        catch (KeyNotFoundException) { return NotFound(); }
+    }
+
+    [HttpPost("{id:guid}/sync")]
+    [ProducesResponseType(typeof(PrepaidInvoiceDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Sync([FromRoute] Guid id, CancellationToken ct)
+    {
+        try
+        {
+            await _sender.Send(new SyncPrepaidInvoiceCommand(id), ct);
+            var dto = await _sender.Send(new GetPrepaidInvoiceQuery(id), ct);
+            return Ok(dto);
+        }
+        catch (KeyNotFoundException) { return NotFound(); }
     }
 }
 
@@ -565,6 +693,18 @@ public interface IAccountingClient
         DateTimeOffset occurredAt,
         string? idempotencyKey,
         CancellationToken ct);
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Abstractions\IAddressGenerator.cs ===
+namespace GatewayService.AccountCharge.Application.Interfaces
+{
+    public interface IAddressGenerator
+    {
+        Task<(string Address, Guid WalletId)> GenerateAsync(
+            string currency,
+            string? network,
+            CancellationToken cancellationToken);
+    }
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Abstractions\IInvoiceNumberGenerator.cs ===
@@ -1093,6 +1233,57 @@ public sealed class CreateInvoiceHandler : IRequestHandler<CreateInvoiceCommand,
     }
 }
 
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\Deposits\GenerateAddressCommand.cs ===
+// File: Application/Commands/Deposits/GenerateAddressCommand.cs
+using GatewayService.AccountCharge.Application.Contracts.Deposits;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.Deposits;
+
+// Request to generate a deposit address via Nobitex
+public sealed record GenerateAddressCommand(
+    string Currency,
+    string? Network
+) : IRequest<GeneratedAddressResult>;
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\Deposits\GenerateAddressCommandHandler.cs ===
+// File: Application/Commands/Deposits/GenerateAddressCommandHandler.cs
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Application.Contracts.Deposits;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.Deposits;
+
+internal sealed class GenerateAddressCommandHandler
+    : IRequestHandler<GenerateAddressCommand, GeneratedAddressResult>
+{
+    private readonly INobitexClient _nobitex;
+
+    public GenerateAddressCommandHandler(INobitexClient nobitex)
+    {
+        _nobitex = nobitex;
+    }
+
+    public async Task<GeneratedAddressResult> Handle(
+        GenerateAddressCommand request,
+        CancellationToken cancellationToken)
+    {
+        var dto = await _nobitex.GenerateAddressAsync(
+            request.Currency,
+            request.Network,
+            cancellationToken);
+
+        return new GeneratedAddressResult
+        {
+            Address = dto.Address,
+            Currency = dto.Currency,
+            Network = dto.Network,
+            WalletId = dto.WalletId,
+            CreatedAt = dto.CreatedAt
+        };
+    }
+}
+
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\GenerateAndAttachAddress\GenerateAndAttachAddressToInvoiceCommand.cs ===
 using GatewayService.AccountCharge.Application.DTOs;
 using MediatR;
@@ -1281,6 +1472,29 @@ public static class AssetMapper
     }
 }
 
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Contracts\Deposits\GenerateAddressRequest.cs ===
+// File: Application/Contracts/Deposits/GenerateAddressRequest.cs
+namespace GatewayService.AccountCharge.Application.Contracts.Deposits;
+
+public sealed class GenerateAddressRequest
+{
+    public string Currency { get; set; } = default!;
+    public string? Network { get; set; }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Contracts\Deposits\GeneratedAddressResult.cs ===
+// File: Application/Contracts/Deposits/GeneratedAddressResult.cs
+namespace GatewayService.AccountCharge.Application.Contracts.Deposits;
+
+public sealed class GeneratedAddressResult
+{
+    public string Address { get; init; } = default!;
+    public string Currency { get; init; } = default!;
+    public string? Network { get; init; }
+    public int WalletId { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+}
+
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\DTOs\GeneratedAddressDto.cs ===
 namespace GatewayService.AccountCharge.Application.DTOs;
 
@@ -1369,6 +1583,33 @@ public sealed class InvoiceDto
     public IReadOnlyCollection<InvoiceAddressDto> Addresses { get; init; } = Array.Empty<InvoiceAddressDto>();
 }
 
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\DTOs\PrepaidInvoiceDto.cs ===
+using GatewayService.AccountCharge.Domain.PrepaidInvoices;
+
+namespace GatewayService.AccountCharge.Application.DTOs;
+
+public sealed class PrepaidInvoiceDto
+{
+    public Guid Id { get; init; }
+    public string? CustomerId { get; init; }
+    public string Currency { get; init; } = default!;
+    public string? Network { get; init; }
+    public string TxHash { get; init; } = default!;
+    public PrepaidInvoiceStatus Status { get; init; }
+    public DateTimeOffset CreatedAt { get; init; }
+    public DateTimeOffset? ExpiresAt { get; init; }
+
+    public decimal? ObservedAmount { get; init; }
+    public string? ObservedCurrency { get; init; }
+    public string? ObservedAddress { get; init; }
+    public string? ObservedTag { get; init; }
+    public int? ObservedWalletId { get; init; }
+    public int ConfirmationsObserved { get; init; }
+    public int RequiredConfirmationsObserved { get; init; }
+    public DateTimeOffset? ConfirmedAt { get; init; }
+    public DateTimeOffset? LastCheckedAt { get; init; }
+}
+
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\DTOs\WalletDto.cs ===
 namespace GatewayService.AccountCharge.Application.DTOs;
 
@@ -1381,6 +1622,215 @@ public sealed class WalletDto
     public bool HasDepositAddress { get; init; }
     public string? DepositAddress { get; init; }   // NEW (helpful for fallback)
     public string? DepositTag { get; init; }       // NEW
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Prepaid\CreatePrepaidInvoiceCommand.cs ===
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.Prepaid;
+
+public sealed record CreatePrepaidInvoiceCommand(
+    string Currency,
+    string? Network,
+    string TxHash,
+    string? CustomerId,
+    TimeSpan? Ttl
+) : IRequest<Guid>;
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Prepaid\CreatePrepaidInvoiceHandler.cs ===
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Domain.PrepaidInvoices;
+using GatewayService.AccountCharge.Domain.Repositories;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.Prepaid;
+
+public sealed class CreatePrepaidInvoiceHandler : IRequestHandler<CreatePrepaidInvoiceCommand, Guid>
+{
+    private readonly IPrepaidInvoiceRepository _repo;
+    private readonly IUnitOfWork _uow;
+
+    public CreatePrepaidInvoiceHandler(IPrepaidInvoiceRepository repo, IUnitOfWork uow)
+    {
+        _repo = repo; _uow = uow;
+    }
+
+    public async Task<Guid> Handle(CreatePrepaidInvoiceCommand request, CancellationToken ct)
+    {
+        // idempotency by txHash
+        var existing = await _repo.GetByTxHashAsync(request.TxHash.Trim(), ct);
+        if (existing is not null) return existing.Id;
+
+        var entity = PrepaidInvoice.Create(request.Currency, request.Network, request.TxHash, request.CustomerId, request.Ttl);
+        await _repo.AddAsync(entity, ct);
+        await _uow.SaveChangesAsync(ct);
+        return entity.Id;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Prepaid\SyncPrepaidInvoiceCommand.cs ===
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Commands.Prepaid;
+
+public sealed record SyncPrepaidInvoiceCommand(Guid Id) : IRequest<bool>; // true if state changed
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Prepaid\SyncPrepaidInvoiceHandler.cs ===
+using GatewayService.AccountCharge.Application.Abstractions;
+using GatewayService.AccountCharge.Application.Common;
+using GatewayService.AccountCharge.Application.DTOs;
+using GatewayService.AccountCharge.Domain.PrepaidInvoices;
+using GatewayService.AccountCharge.Domain.Repositories;
+using MediatR;
+using Microsoft.Extensions.Logging;
+
+namespace GatewayService.AccountCharge.Application.Commands.Prepaid;
+
+public sealed class SyncPrepaidInvoiceHandler : IRequestHandler<SyncPrepaidInvoiceCommand, bool>
+{
+    private readonly IPrepaidInvoiceRepository _repo;
+    private readonly IInvoiceRepository _legacyInvoices; // برای جلوگیری از double-apply
+    private readonly INobitexClient _nobitex;
+    private readonly IPaymentMatchingOptionsProvider _opts;
+    private readonly IAccountingClient _accounting;
+    private readonly IUnitOfWork _uow;
+    private readonly ILogger<SyncPrepaidInvoiceHandler> _log;
+
+    private const int FETCH_LIMIT = 200;
+    private static readonly TimeSpan LOOKBACK = TimeSpan.FromDays(30);
+
+    public SyncPrepaidInvoiceHandler(
+        IPrepaidInvoiceRepository repo,
+        IInvoiceRepository legacyInvoices,
+        INobitexClient nobitex,
+        IPaymentMatchingOptionsProvider opts,
+        IAccountingClient accounting,
+        IUnitOfWork uow,
+        ILogger<SyncPrepaidInvoiceHandler> log)
+    {
+        _repo = repo;
+        _legacyInvoices = legacyInvoices;
+        _nobitex = nobitex;
+        _opts = opts;
+        _accounting = accounting;
+        _uow = uow;
+        _log = log;
+    }
+
+    public async Task<bool> Handle(SyncPrepaidInvoiceCommand request, CancellationToken ct)
+    {
+        var p = await _repo.GetByIdAsync(request.Id, ct) ?? throw new KeyNotFoundException("PrepaidInvoice not found.");
+        var before = p.Status;
+
+        if (p.IsExpired())
+        {
+            p.MarkExpired();
+            await _repo.UpdateAsync(p, ct);
+            await _uow.SaveChangesAsync(ct);
+            return before != p.Status;
+        }
+
+        // ❗به‌جای رد کردن، فقط Accounting را بعداً Skip می‌کنیم
+        var alreadyAppliedOnLegacy = await _legacyInvoices.HasAnyAppliedDepositAsync(p.TxHash, ct);
+        if (alreadyAppliedOnLegacy)
+            _log.LogInformation("PrepaidInvoice {Id}: Tx {Tx} already applied on legacy. Will skip Accounting but proceed to mark status.", p.Id, p.TxHash);
+
+        // Wallets با ارز موردنظر
+        var wallets = await _nobitex.GetWalletsAsync(ct);
+        var wantedSymbol = AssetMapper.NormalizeCurrency(p.Currency); // upper
+        var candidateWallets = wallets.Where(w => AssetMapper.NormalizeCurrency(w.Currency) == wantedSymbol).ToList();
+
+        if (candidateWallets.Count == 0)
+            throw new InvalidOperationException($"No Nobitex wallet for currency {p.Currency}");
+
+        // جست‌وجوی تراکنش
+        IncomingDepositDto? dep = null;
+        foreach (var w in candidateWallets)
+        {
+            var since = p.CreatedAt - LOOKBACK;
+            var list = await _nobitex.GetRecentDepositsAsync(w.Id, FETCH_LIMIT, since, ct);
+            dep = list.FirstOrDefault(d => string.Equals(d.TxHash?.Trim(), p.TxHash, StringComparison.OrdinalIgnoreCase));
+            if (dep is not null)
+            {
+                _log.LogInformation("PrepaidInvoice {Id}: Found deposit (wallet {WalletId}) {Amount} {Currency} at {CreatedAt:o}",
+                    p.Id, w.Id, dep.Amount, dep.Currency, dep.CreatedAt);
+                break;
+            }
+        }
+
+        if (dep is null)
+        {
+            // پیدا نشد → فقط LastCheckedAt آپدیت می‌ماند
+            await _repo.UpdateAsync(p, ct);
+            await _uow.SaveChangesAsync(ct);
+            return before != p.Status;
+        }
+
+        // تطبیق ارز
+        if (!string.Equals(dep.Currency, p.Currency, StringComparison.OrdinalIgnoreCase))
+        {
+            p.MarkRejectedCurrencyMismatch(dep.Currency, dep.CreatedAt);
+            await _repo.UpdateAsync(p, ct);
+            await _uow.SaveChangesAsync(ct);
+            return before != p.Status;
+        }
+
+        // ❌ بررسی آدرس حذف شد (طبق توافق)
+
+        // کانفرمیشن‌ها
+        var opts = _opts.Get(dep.Currency, dep.Network ?? string.Empty);
+        var required = Math.Max(opts.MinConfirmations, dep.RequiredConfirmations);
+        if (dep.Confirmations < required)
+        {
+            p.MarkAwaiting(dep.Confirmations, dep.RequiredConfirmations, dep.Amount, dep.Currency,
+                           dep.Address, dep.Tag, dep.WalletId == 0 ? null : dep.WalletId, dep.CreatedAt);
+            await _repo.UpdateAsync(p, ct);
+            await _uow.SaveChangesAsync(ct);
+            return before != p.Status;
+        }
+
+        // ✅ Paid
+        p.MarkPaid(dep.Amount, dep.Currency, dep.Address, dep.Tag,
+                   dep.WalletId == 0 ? null : dep.WalletId, dep.Confirmations, dep.RequiredConfirmations, dep.CreatedAt);
+
+        await _repo.UpdateAsync(p, ct);
+        await _uow.SaveChangesAsync(ct);
+
+        // Accounting فقط اگر قبلاً روی legacy اعمال نشده باشد
+        if (!alreadyAppliedOnLegacy)
+        {
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(p.CustomerId) && Guid.TryParse(p.CustomerId, out var ext))
+                {
+                    await _accounting.CreateDepositAsync(
+                        externalCustomerId: ext,
+                        amount: dep.Amount,
+                        currency: dep.Currency.ToUpperInvariant(),
+                        occurredAt: dep.CreatedAt,
+                        idempotencyKey: p.TxHash,
+                        ct: ct);
+                }
+                else
+                {
+                    _log.LogWarning("PrepaidInvoice {Id}: CustomerId is not a Guid; skipping Accounting.", p.Id);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Accounting sync failed for PrepaidInvoice {Id} (Tx {Tx})", p.Id, p.TxHash);
+                p.MarkAccountingSyncFailed();
+                await _repo.UpdateAsync(p, ct);
+                await _uow.SaveChangesAsync(ct);
+            }
+        }
+        else
+        {
+            _log.LogInformation("PrepaidInvoice {Id}: Skipped Accounting because tx is already applied on legacy.", p.Id);
+        }
+
+        return before != p.Status;
+    }
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Queries\GetInvoiceDetails\GetInvoiceDetailsHandler.cs ===
@@ -1671,6 +2121,52 @@ namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceTransaction
 
 public sealed record GetInvoiceTransactionsAllQuery(Guid InvoiceId)
     : IRequest<IReadOnlyList<IncomingDepositDto>>;
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Queries\Prepaid\GetPrepaidInvoiceHandler.cs ===
+using GatewayService.AccountCharge.Application.DTOs;
+using GatewayService.AccountCharge.Domain.Repositories;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Queries.Prepaid;
+
+public sealed class GetPrepaidInvoiceHandler : IRequestHandler<GetPrepaidInvoiceQuery, PrepaidInvoiceDto>
+{
+    private readonly IPrepaidInvoiceRepository _repo;
+    public GetPrepaidInvoiceHandler(IPrepaidInvoiceRepository repo) => _repo = repo;
+
+    public async Task<PrepaidInvoiceDto> Handle(GetPrepaidInvoiceQuery request, CancellationToken ct)
+    {
+        var p = await _repo.GetByIdAsync(request.Id, ct) ?? throw new KeyNotFoundException("PrepaidInvoice not found");
+        return new PrepaidInvoiceDto
+        {
+            Id = p.Id,
+            CustomerId = p.CustomerId,
+            Currency = p.Currency,
+            Network = p.Network,
+            TxHash = p.TxHash,
+            Status = p.Status,
+            CreatedAt = p.CreatedAt,
+            ExpiresAt = p.ExpiresAt,
+            ObservedAmount = p.ObservedAmount,
+            ObservedCurrency = p.ObservedCurrency,
+            ObservedAddress = p.ObservedAddress,
+            ObservedTag = p.ObservedTag,
+            ObservedWalletId = p.ObservedWalletId,
+            ConfirmationsObserved = p.ConfirmationsObserved,
+            RequiredConfirmationsObserved = p.RequiredConfirmationsObserved,
+            ConfirmedAt = p.ConfirmedAt,
+            LastCheckedAt = p.LastCheckedAt
+        };
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Queries\Prepaid\GetPrepaidInvoiceQuery.cs ===
+using GatewayService.AccountCharge.Application.DTOs;
+using MediatR;
+
+namespace GatewayService.AccountCharge.Application.Queries.Prepaid;
+
+public sealed record GetPrepaidInvoiceQuery(Guid Id) : IRequest<PrepaidInvoiceDto>;
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Services\DepositMatchingOrchestrator.cs ===
 using GatewayService.AccountCharge.Application.Abstractions;
@@ -2259,6 +2755,132 @@ public sealed class PaymentMatchingOptions
     public bool AllowMultipleDeposits { get; init; } = true;
 }
 
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\PrepaidInvoices\PrepaidInvoice.cs ===
+using GatewayService.AccountCharge.Domain.Common;
+using GatewayService.AccountCharge.Domain.PrepaidInvoices;
+
+namespace GatewayService.AccountCharge.Domain.PrepaidInvoices;
+
+public sealed class PrepaidInvoice : Entity
+{
+    public string? CustomerId { get; private set; }
+
+    public string Currency { get; private set; } = default!;
+    public string? Network { get; private set; }        // optional
+    public string TxHash { get; private set; } = default!;
+
+    public PrepaidInvoiceStatus Status { get; private set; } = PrepaidInvoiceStatus.AwaitingConfirmations;
+
+    public DateTimeOffset CreatedAt { get; private set; }
+    public DateTimeOffset? ExpiresAt { get; private set; }
+
+    // Observation snapshot (آخرین دیده‌شده از اکسچنج)
+    public decimal? ObservedAmount { get; private set; }
+    public string? ObservedCurrency { get; private set; }
+    public string? ObservedAddress { get; private set; }
+    public string? ObservedTag { get; private set; }
+    public int? ObservedWalletId { get; private set; }
+    public int ConfirmationsObserved { get; private set; }
+    public int RequiredConfirmationsObserved { get; private set; }
+    public DateTimeOffset? ConfirmedAt { get; private set; }
+    public DateTimeOffset? LastCheckedAt { get; private set; }
+
+    private PrepaidInvoice() { } // EF
+
+    private PrepaidInvoice(string currency, string? network, string txHash, string? customerId, DateTimeOffset createdAt, DateTimeOffset? expiresAt)
+    {
+        if (string.IsNullOrWhiteSpace(currency)) throw new ArgumentException("Currency is required");
+        if (string.IsNullOrWhiteSpace(txHash)) throw new ArgumentException("TxHash is required");
+        if (expiresAt.HasValue && expiresAt <= createdAt) throw new ArgumentException("ExpiresAt must be after CreatedAt");
+
+        Currency = currency.Trim().ToUpperInvariant();
+        Network = string.IsNullOrWhiteSpace(network) ? null : network.Trim().ToUpperInvariant();
+        TxHash = txHash.Trim();
+        CustomerId = string.IsNullOrWhiteSpace(customerId) ? null : customerId.Trim();
+
+        CreatedAt = createdAt;
+        ExpiresAt = expiresAt;
+    }
+
+    public static PrepaidInvoice Create(string currency, string? network, string txHash, string? customerId, TimeSpan? ttl = null, DateTimeOffset? now = null)
+    {
+        var created = now ?? DateTimeOffset.UtcNow;
+        var expires = ttl.HasValue ? created.Add(ttl.Value) : (DateTimeOffset?)null;
+        return new PrepaidInvoice(currency, network, txHash, customerId, created, expires);
+    }
+
+    public bool IsExpired(DateTimeOffset? now = null)
+        => ExpiresAt.HasValue && (now ?? DateTimeOffset.UtcNow) > ExpiresAt.Value;
+
+    public void MarkRejectedWrongAddress(string? addr, string? tag, int? walletId, DateTimeOffset? observedAt)
+    {
+        Status = PrepaidInvoiceStatus.RejectedWrongAddress;
+        ObservedAddress = addr;
+        ObservedTag = tag;
+        ObservedWalletId = walletId;
+        LastCheckedAt = observedAt ?? DateTimeOffset.UtcNow;
+    }
+
+    public void MarkRejectedCurrencyMismatch(string observedCurrency, DateTimeOffset? observedAt)
+    {
+        Status = PrepaidInvoiceStatus.RejectedCurrencyMismatch;
+        ObservedCurrency = observedCurrency;
+        LastCheckedAt = observedAt ?? DateTimeOffset.UtcNow;
+    }
+
+    public void MarkAwaiting(int confirmations, int required, decimal amount, string currency, string? addr, string? tag, int? walletId, DateTimeOffset createdAt)
+    {
+        Status = PrepaidInvoiceStatus.AwaitingConfirmations;
+        ConfirmationsObserved = confirmations;
+        RequiredConfirmationsObserved = required;
+        ObservedAmount = amount;
+        ObservedCurrency = currency;
+        ObservedAddress = addr;
+        ObservedTag = tag;
+        ObservedWalletId = walletId;
+        LastCheckedAt = DateTimeOffset.UtcNow;
+    }
+
+    public void MarkPaid(decimal amount, string currency, string? addr, string? tag, int? walletId, int confirmations, int required, DateTimeOffset occurredAt)
+    {
+        Status = PrepaidInvoiceStatus.Paid;
+        ObservedAmount = amount;
+        ObservedCurrency = currency;
+        ObservedAddress = addr;
+        ObservedTag = tag;
+        ObservedWalletId = walletId;
+        ConfirmationsObserved = confirmations;
+        RequiredConfirmationsObserved = required;
+        ConfirmedAt = occurredAt;
+        LastCheckedAt = DateTimeOffset.UtcNow;
+    }
+
+    public void MarkExpired()
+    {
+        if (Status == PrepaidInvoiceStatus.Paid) return;
+        Status = PrepaidInvoiceStatus.Expired;
+    }
+
+    public void MarkAccountingSyncFailed()
+    {
+        if (Status == PrepaidInvoiceStatus.Paid)
+            Status = PrepaidInvoiceStatus.AccountingSyncFailed;
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\PrepaidInvoices\PrepaidInvoiceStatus.cs ===
+namespace GatewayService.AccountCharge.Domain.PrepaidInvoices;
+
+public enum PrepaidInvoiceStatus
+{
+    AwaitingConfirmations = 0,
+    Paid = 1,
+    RejectedWrongAddress = 2,
+    RejectedCurrencyMismatch = 3,
+    Expired = 4,
+    AccountingSyncFailed = 5
+}
+
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Repositories\IInvoiceRepository.cs ===
 using GatewayService.AccountCharge.Domain.Invoices;
 using GatewayService.AccountCharge.Domain.ValueObjects;
@@ -2281,6 +2903,20 @@ public interface IInvoiceRepository
     Task<bool> HasAnyAppliedDepositAsync(string txHash, CancellationToken ct = default);
 
     Task<bool> ExistsAsync(Expression<Func<Invoice, bool>> predicate, CancellationToken ct = default);
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Repositories\IPrepaidInvoiceRepository.cs ===
+using GatewayService.AccountCharge.Domain.PrepaidInvoices;
+
+namespace GatewayService.AccountCharge.Domain.Repositories;
+
+public interface IPrepaidInvoiceRepository
+{
+    Task AddAsync(PrepaidInvoice entity, CancellationToken ct = default);
+    Task UpdateAsync(PrepaidInvoice entity, CancellationToken ct = default);
+    Task<PrepaidInvoice?> GetByIdAsync(Guid id, CancellationToken ct = default);
+    Task<PrepaidInvoice?> GetByTxHashAsync(string txHash, CancellationToken ct = default);
+    Task<bool> ExistsByTxHashAsync(string txHash, CancellationToken ct = default);
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\ValueObjects\ChainAddress.cs ===
@@ -2507,6 +3143,58 @@ public sealed class NobitexPollingService : BackgroundService
         }
 
         _logger.LogInformation("Nobitex polling service stopped.");
+    }
+}
+
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Background\PrepaidInvoicePollingService.cs ===
+using GatewayService.AccountCharge.Application.Commands.Prepaid;
+using GatewayService.AccountCharge.Domain.PrepaidInvoices;
+using GatewayService.AccountCharge.Infrastructure.Persistence;
+using MediatR;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+
+namespace GatewayService.AccountCharge.Infrastructure.Background;
+
+public sealed class PrepaidInvoicePollingService : BackgroundService
+{
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly ILogger<PrepaidInvoicePollingService> _log;
+    private readonly TimeSpan _interval = TimeSpan.FromSeconds(30);
+
+    public PrepaidInvoicePollingService(IServiceScopeFactory scopeFactory, ILogger<PrepaidInvoicePollingService> log)
+    {
+        _scopeFactory = scopeFactory; _log = log;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                using var scope = _scopeFactory.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<AccountChargeDb>();
+                var mediator = scope.ServiceProvider.GetRequiredService<IMediator>();
+
+                var pending = await db.PrepaidInvoices
+                    .AsNoTracking()
+                    .Where(x => x.Status == PrepaidInvoiceStatus.AwaitingConfirmations && (!x.ExpiresAt.HasValue || x.ExpiresAt > DateTimeOffset.UtcNow))
+                    .OrderBy(x => x.CreatedAt)
+                    .Take(50)
+                    .Select(x => x.Id)
+                    .ToListAsync(stoppingToken);
+
+                foreach (var id in pending)
+                    await mediator.Send(new SyncPrepaidInvoiceCommand(id), stoppingToken);
+            }
+            catch (Exception ex) { _log.LogError(ex, "PrepaidInvoice polling iteration failed"); }
+
+            try { await Task.Delay(_interval, stoppingToken); }
+            catch (OperationCanceledException) { }
+        }
     }
 }
 
@@ -3084,6 +3772,46 @@ public sealed class InvoiceConfiguration : IEntityTypeConfiguration<Invoice>
     }
 }
 
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Persistence\Configurations\PrepaidInvoiceConfiguration.cs ===
+using GatewayService.AccountCharge.Domain.PrepaidInvoices;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+namespace GatewayService.AccountCharge.Infrastructure.Persistence.Configurations;
+
+public sealed class PrepaidInvoiceConfiguration : IEntityTypeConfiguration<PrepaidInvoice>
+{
+    public void Configure(EntityTypeBuilder<PrepaidInvoice> b)
+    {
+        b.ToTable("PrepaidInvoices");
+        b.HasKey(x => x.Id);
+        b.Property(x => x.Id).ValueGeneratedNever();
+
+        b.Property(x => x.CustomerId).HasMaxLength(64);
+        b.Property(x => x.Currency).HasMaxLength(16).IsRequired();
+        b.Property(x => x.Network).HasMaxLength(32);
+        b.Property(x => x.TxHash).HasMaxLength(128).IsRequired();
+        b.HasIndex(x => x.TxHash).IsUnique();
+
+        b.Property(x => x.Status).HasConversion<string>().HasMaxLength(64).IsRequired();
+        b.Property(x => x.CreatedAt).IsRequired();
+        b.Property(x => x.ExpiresAt);
+
+        b.Property(x => x.ObservedAmount).HasColumnType("decimal(38, 18)");
+        b.Property(x => x.ObservedCurrency).HasMaxLength(16);
+        b.Property(x => x.ObservedAddress).HasMaxLength(256);
+        b.Property(x => x.ObservedTag).HasMaxLength(128);
+        b.Property(x => x.ObservedWalletId);
+        b.Property(x => x.ConfirmationsObserved);
+        b.Property(x => x.RequiredConfirmationsObserved);
+        b.Property(x => x.ConfirmedAt);
+        b.Property(x => x.LastCheckedAt);
+
+        b.HasIndex(x => x.Status);
+        b.HasIndex(x => x.CreatedAt);
+    }
+}
+
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Persistence\AccountChargeDb.cs ===
 using Microsoft.EntityFrameworkCore;
 
@@ -3098,6 +3826,7 @@ public sealed class AccountChargeDb : DbContext
 
     // Aggregates
     public DbSet<Domain.Invoices.Invoice> Invoices => Set<Domain.Invoices.Invoice>();
+    public DbSet<Domain.PrepaidInvoices.PrepaidInvoice> PrepaidInvoices => Set<Domain.PrepaidInvoices.PrepaidInvoice>(); // 👈 جدید
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -3318,6 +4047,38 @@ public sealed class EfInvoiceRepository : IInvoiceRepository
 
 }
 
+=== FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Repositories\EfPrepaidInvoiceRepository.cs ===
+using GatewayService.AccountCharge.Domain.PrepaidInvoices;
+using GatewayService.AccountCharge.Domain.Repositories;
+using Microsoft.EntityFrameworkCore;
+
+namespace GatewayService.AccountCharge.Infrastructure.Repositories;
+
+public sealed class EfPrepaidInvoiceRepository : IPrepaidInvoiceRepository
+{
+    private readonly Persistence.AccountChargeDb _db;
+    public EfPrepaidInvoiceRepository(Persistence.AccountChargeDb db) => _db = db;
+
+    public async Task AddAsync(PrepaidInvoice entity, CancellationToken ct = default)
+        => await _db.PrepaidInvoices.AddAsync(entity, ct);
+
+    public Task UpdateAsync(PrepaidInvoice entity, CancellationToken ct = default)
+    {
+        var e = _db.Entry(entity);
+        if (e.State == EntityState.Detached) _db.PrepaidInvoices.Attach(entity);
+        return Task.CompletedTask;
+    }
+
+    public Task<PrepaidInvoice?> GetByIdAsync(Guid id, CancellationToken ct = default)
+        => _db.PrepaidInvoices.AsTracking().FirstOrDefaultAsync(x => x.Id == id, ct);
+
+    public Task<PrepaidInvoice?> GetByTxHashAsync(string txHash, CancellationToken ct = default)
+        => _db.PrepaidInvoices.AsNoTracking().FirstOrDefaultAsync(x => x.TxHash == txHash, ct);
+
+    public Task<bool> ExistsByTxHashAsync(string txHash, CancellationToken ct = default)
+        => _db.PrepaidInvoices.AsNoTracking().AnyAsync(x => x.TxHash == txHash, ct);
+}
+
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Services\DateTicksInvoiceNumberGenerator.cs ===
 using GatewayService.AccountCharge.Application.Abstractions;
 
@@ -3374,9 +4135,11 @@ public static class AccountingRegistration
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\DependencyInjection.cs ===
+using System;
 using GatewayService.AccountCharge.Application.Abstractions;
 using GatewayService.AccountCharge.Application.Commands.CreateInvoice;
 using GatewayService.AccountCharge.Application.Services;
+using GatewayService.AccountCharge.Domain.Repositories;
 using GatewayService.AccountCharge.Infrastructure.Background;
 using GatewayService.AccountCharge.Infrastructure.Http;
 using GatewayService.AccountCharge.Infrastructure.Options;
@@ -3384,16 +4147,18 @@ using GatewayService.AccountCharge.Infrastructure.Persistence;
 using GatewayService.AccountCharge.Infrastructure.Providers;
 using GatewayService.AccountCharge.Infrastructure.Repositories;
 using GatewayService.AccountCharge.Infrastructure.Services;
+using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace GatewayService.AccountCharge.Infrastructure;
 
 public static class DependencyInjection
 {
-    // ⚠️ This AddApplication() really belongs in the Application project/namespace.
+    // Application wiring (MediatR, handlers)
     public static IServiceCollection AddApplication(this IServiceCollection services)
     {
         services.AddMediatR(cfg =>
@@ -3404,54 +4169,84 @@ public static class DependencyInjection
         return services;
     }
 
-    public static IServiceCollection AddInfrastructure(
-        this IServiceCollection services, IConfiguration configuration)
+    // Infra wiring (EF Core, HttpClients, repos, orchestrators, bg workers)
+    public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
-        // DbContext
+        // ---------------- EF Core ----------------
         var cs = configuration.GetConnectionString("AccountChargeDb")
                  ?? throw new InvalidOperationException("Missing connection string 'AccountChargeDb'");
+
         services.AddDbContext<AccountChargeDb>(opt =>
-           opt.UseSqlServer(cs)
-              .EnableSensitiveDataLogging()      // نمایش مقادیر پارامترها
-              .EnableDetailedErrors()            // جزئیات بیشتر برای خطاها
-              .LogTo(Console.WriteLine,          // مقصد لاگ (می‌تونی لاگر هم بذاری)
-                  new[]
-                  {
-                   Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.CommandExecuting,
-                   Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.CommandExecuted,
-                   Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.ContextDisposed,
-                   Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.SaveChangesStarting,
-                   Microsoft.EntityFrameworkCore.Diagnostics.CoreEventId.SaveChangesCompleted
-                  },
-                  Microsoft.Extensions.Logging.LogLevel.Information,
-                  DbContextLoggerOptions.SingleLine | DbContextLoggerOptions.UtcTime // آپشن‌های اضافی برای خوانایی
-              )
-       );
+            opt.UseSqlServer(cs)
+               .EnableSensitiveDataLogging()
+               .EnableDetailedErrors()
+               .LogTo(Console.WriteLine,
+                   new[]
+                   {
+                       RelationalEventId.CommandExecuting,
+                       RelationalEventId.CommandExecuted,
+                       CoreEventId.ContextDisposed,
+                       CoreEventId.SaveChangesStarting,
+                       CoreEventId.SaveChangesCompleted
+                   },
+                   Microsoft.Extensions.Logging.LogLevel.Information,
+                   DbContextLoggerOptions.SingleLine | DbContextLoggerOptions.UtcTime)
+        );
 
-        // UoW & Repositories
-        services.AddScoped<IUnitOfWork, UnitOfWork>();
-        services.AddScoped<Domain.Repositories.IInvoiceRepository, EfInvoiceRepository>();
-
-        // Options (Payment Matching only; Nobitex is bound/validated inside AddNobitexHttp)
+        // ---------------- Options ----------------
+        // Payment matching from config
         services.Configure<PaymentMatchingOptionsConfig>(configuration.GetSection("PaymentMatching"));
 
-        // HttpClient (Typed) with base address, UA, and Token header
-        services.AddNobitexHttp(configuration);
-        services.AddAccountingHttp(configuration);   // ✅ merged in here
+        // Nobitex options (Program.cs قبلاً Bind می‌کند؛ اینجا هم اگر خواستی:)
+        services.Configure<NobitexOptionsConfig>(configuration.GetSection(NobitexOptionsConfig.SectionName));
 
-        // Providers / Generators
+        // ---------------- Http Clients ----------------
+        // Accounting (has its own helper)
+        services.AddAccountingHttp(configuration);
+
+        // Nobitex (Typed client + baseUrl + token header if present)
+        // Infrastructure/DependencyInjection.cs
+        services.AddHttpClient<INobitexClient, NobitexClient>((sp, http) =>
+        {
+            var nobitex = sp.GetRequiredService<IOptions<NobitexOptionsConfig>>().Value;
+
+            var baseUrl = string.IsNullOrWhiteSpace(nobitex.BaseUrl)
+                ? "https://api.nobitex.ir"
+                : nobitex.BaseUrl;
+
+            http.BaseAddress = new Uri(baseUrl);
+            http.DefaultRequestHeaders.TryAddWithoutValidation("Accept", "application/json");
+            if (!string.IsNullOrWhiteSpace(nobitex.UserAgent))
+                http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", nobitex.UserAgent);
+
+            // 👇 همین خط مشکل رو حل می‌کنه: به جای Bearer از Token استفاده کن
+            if (!string.IsNullOrWhiteSpace(nobitex.Token))
+                http.DefaultRequestHeaders.Remove("Authorization");
+                http.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", $"Token {nobitex.Token}");
+        });
+
+
+        // ---------------- UoW & Repositories ----------------
+        services.AddScoped<IUnitOfWork, UnitOfWork>();
+        services.AddScoped<IInvoiceRepository, EfInvoiceRepository>();
+        services.AddScoped<IPrepaidInvoiceRepository, EfPrepaidInvoiceRepository>(); // ← جدید
+
+        // ---------------- Providers / Generators ----------------
         services.AddScoped<IPaymentMatchingOptionsProvider, ConfigPaymentMatchingOptionsProvider>();
         services.AddScoped<IInvoiceNumberGenerator, DateTicksInvoiceNumberGenerator>();
 
-        // Orchestrator (SCOPED) – used by controllers and background job
-        services.AddScoped<DepositMatchingOrchestrator>(); // from Application.Services
+        // ---------------- Orchestrators ----------------
+        services.AddScoped<DepositMatchingOrchestrator>();
 
-        // Background polling (Singleton IHostedService)
+        // ---------------- Background Services ----------------
         var enablePolling = configuration.GetValue<bool?>("Nobitex:EnablePolling") ?? true;
         if (enablePolling)
-        {
             services.AddHostedService<NobitexPollingService>();
-        }
+
+        // اگر خواستی برای Prepaid ها هم پولر اضافه کنی:
+        // var enablePrepaidPolling = configuration.GetValue<bool?>("Prepaid:EnablePolling") ?? false;
+        // if (enablePrepaidPolling)
+        //     services.AddHostedService<PrepaidInvoicePollingService>();
 
         return services;
     }
