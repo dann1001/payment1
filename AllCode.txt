@@ -7,7 +7,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using System.Net;
 
-namespace GatewayService.AccountCharge.Api.Controllers;
 
 [ApiController]
 [Route("api/v1/deposits")]
@@ -57,7 +56,6 @@ using Microsoft.AspNetCore.Mvc;
 using GatewayService.AccountCharge.Application.Commands.ConfirmTxHash;
 
 
-namespace GatewayService.AccountCharge.Api.Controllers;
 
 [ApiController]
 [ApiVersion("1.0")]
@@ -379,7 +377,6 @@ using GatewayService.AccountCharge.Application.Queries.Prepaid;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 
-namespace GatewayService.AccountCharge.Api.Controllers;
 
 [ApiController]
 [ApiVersion("1.0")]
@@ -454,7 +451,6 @@ public sealed class PrepaidInvoicesController : ControllerBase
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Api\Models\InvoicesDtos.cs ===
-namespace GatewayService.AccountCharge.Api.Models;
 
 // Requests
 
@@ -681,7 +677,6 @@ app.Run();
 // D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Abstractions\IAccountingClient.cs
 using System;
 
-namespace GatewayService.AccountCharge.Application.Abstractions;
 
 public interface IAccountingClient
 {
@@ -696,7 +691,6 @@ public interface IAccountingClient
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Abstractions\IAddressGenerator.cs ===
-namespace GatewayService.AccountCharge.Application.Interfaces
 {
     public interface IAddressGenerator
     {
@@ -708,7 +702,6 @@ namespace GatewayService.AccountCharge.Application.Interfaces
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Abstractions\IInvoiceNumberGenerator.cs ===
-namespace GatewayService.AccountCharge.Application.Abstractions;
 
 /// <summary>
 /// Generates unique, user-facing invoice numbers.
@@ -721,7 +714,6 @@ public interface IInvoiceNumberGenerator
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Abstractions\INobitexClient.cs ===
 using GatewayService.AccountCharge.Application.DTOs;
 
-namespace GatewayService.AccountCharge.Application.Abstractions;
 
 public interface INobitexClient
 {
@@ -737,7 +729,6 @@ public interface INobitexClient
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Abstractions\IPaymentMatchingOptionsProvider.cs ===
 using GatewayService.AccountCharge.Domain.Invoices;
 
-namespace GatewayService.AccountCharge.Application.Abstractions;
 
 
 /// <summary>
@@ -749,7 +740,6 @@ public interface IPaymentMatchingOptionsProvider
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Abstractions\IUnitOfWork.cs ===
-namespace GatewayService.AccountCharge.Application.Abstractions;
 
 public interface IUnitOfWork
 {
@@ -763,7 +753,6 @@ public interface IUnitOfWork
 using GatewayService.AccountCharge.Application.Abstractions;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Behaviors;
 
 /// <summary>
 /// Wraps command handlers in a transaction boundary (if infra supports).
@@ -792,7 +781,6 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace GatewayService.AccountCharge.Application.Behaviors
 {
     internal class ValidationBehavior
     {
@@ -802,7 +790,6 @@ namespace GatewayService.AccountCharge.Application.Behaviors
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\ApplyDeposit\ApplyDepositCommand.cs ===
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
 
 public sealed record ApplyDepositToInvoiceCommand(
     Guid InvoiceId,
@@ -975,7 +962,6 @@ public sealed class ApplyDepositToInvoiceHandler
 using GatewayService.AccountCharge.Application.DTOs;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
 
 public sealed record ApplyDepositsBatchCommand(
     IReadOnlyList<DepositForInvoiceDto> Deposits
@@ -992,7 +978,6 @@ public sealed record ApplyDepositsBatchResult(
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\ApplyDepositsBatch\ApplyDepositsBatchHandler.cs ===
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.ApplyDeposit;
 
 public sealed class ApplyDepositsBatchHandler
     : IRequestHandler<ApplyDepositsBatchCommand, ApplyDepositsBatchResult>
@@ -1042,7 +1027,6 @@ public sealed class ApplyDepositsBatchHandler
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\AttachAddress\AttachAddressToInvoiceCommand.cs ===
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.AttachAddress;
 
 public sealed record AttachAddressToInvoiceCommand(
     Guid InvoiceId,
@@ -1059,7 +1043,6 @@ using GatewayService.AccountCharge.Domain.Repositories;
 using GatewayService.AccountCharge.Domain.ValueObjects;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.AttachAddress;
 
 public sealed class AttachAddressToInvoiceHandler : IRequestHandler<AttachAddressToInvoiceCommand, bool>
 {
@@ -1093,7 +1076,6 @@ public sealed class AttachAddressToInvoiceHandler : IRequestHandler<AttachAddres
 // Application/Commands/ConfirmTxHash/ConfirmTxHashCommand.cs
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.ConfirmTxHash;
 
 public sealed record ConfirmTxHashCommand(Guid InvoiceId, string TxHash)
     : IRequest<ConfirmTxHashResult>;
@@ -1114,7 +1096,6 @@ using GatewayService.AccountCharge.Domain.Repositories;
 using GatewayService.AccountCharge.Domain.ValueObjects;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.ConfirmTxHash;
 
 public sealed class ConfirmTxHashHandler
     : IRequestHandler<ConfirmTxHashCommand, ConfirmTxHashResult>
@@ -1185,7 +1166,6 @@ public sealed class ConfirmTxHashHandler
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Commands\CreateInvoice\CreateInvoiceCommand.cs ===
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.CreateInvoice;
 
 public sealed record CreateInvoiceCommand(
     string? InvoiceNumber,     // if null, generate
@@ -1202,7 +1182,6 @@ using GatewayService.AccountCharge.Domain.Repositories;
 using GatewayService.AccountCharge.Domain.ValueObjects;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.CreateInvoice;
 
 public sealed class CreateInvoiceHandler : IRequestHandler<CreateInvoiceCommand, Guid>
 {
@@ -1238,7 +1217,6 @@ public sealed class CreateInvoiceHandler : IRequestHandler<CreateInvoiceCommand,
 using GatewayService.AccountCharge.Application.Contracts.Deposits;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.Deposits;
 
 // Request to generate a deposit address via Nobitex
 public sealed record GenerateAddressCommand(
@@ -1252,7 +1230,6 @@ using GatewayService.AccountCharge.Application.Abstractions;
 using GatewayService.AccountCharge.Application.Contracts.Deposits;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.Deposits;
 
 internal sealed class GenerateAddressCommandHandler
     : IRequestHandler<GenerateAddressCommand, GeneratedAddressResult>
@@ -1288,7 +1265,6 @@ internal sealed class GenerateAddressCommandHandler
 using GatewayService.AccountCharge.Application.DTOs;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.GenerateAndAttachAddress;
 
 public sealed class GenerateAndAttachAddressToInvoiceCommand : IRequest<GeneratedAddressResult>
 {
@@ -1311,7 +1287,6 @@ using GatewayService.AccountCharge.Domain.Repositories;
 using GatewayService.AccountCharge.Domain.ValueObjects;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.GenerateAndAttachAddress;
 
 public sealed class GenerateAndAttachAddressToInvoiceHandler
     : IRequestHandler<GenerateAndAttachAddressToInvoiceCommand, GeneratedAddressResult>
@@ -1395,7 +1370,6 @@ public sealed class GenerateAndAttachAddressToInvoiceHandler
 // Application/Common/AssetMapper.cs
 using System;
 
-namespace GatewayService.AccountCharge.Application.Common;
 
 public static class AssetMapper
 {
@@ -1474,7 +1448,6 @@ public static class AssetMapper
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Contracts\Deposits\GenerateAddressRequest.cs ===
 // File: Application/Contracts/Deposits/GenerateAddressRequest.cs
-namespace GatewayService.AccountCharge.Application.Contracts.Deposits;
 
 public sealed class GenerateAddressRequest
 {
@@ -1484,7 +1457,6 @@ public sealed class GenerateAddressRequest
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Contracts\Deposits\GeneratedAddressResult.cs ===
 // File: Application/Contracts/Deposits/GeneratedAddressResult.cs
-namespace GatewayService.AccountCharge.Application.Contracts.Deposits;
 
 public sealed class GeneratedAddressResult
 {
@@ -1496,7 +1468,6 @@ public sealed class GeneratedAddressResult
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\DTOs\GeneratedAddressDto.cs ===
-namespace GatewayService.AccountCharge.Application.DTOs;
 
 public sealed class GeneratedAddressDto
 {
@@ -1515,7 +1486,6 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace GatewayService.AccountCharge.Application.DTOs;
 
     public sealed record GeneratedAddressResult(
      string Address,
@@ -1529,7 +1499,6 @@ namespace GatewayService.AccountCharge.Application.DTOs;
 
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\DTOs\IncomingDepositDto.cs ===
-namespace GatewayService.AccountCharge.Application.DTOs;
 
 /// <summary>
 /// Transport shape for a raw deposit observed via Nobitex client.
@@ -1551,7 +1520,6 @@ public sealed class IncomingDepositDto
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\DTOs\InvoiceAddressDto.cs ===
-namespace GatewayService.AccountCharge.Application.DTOs;
 
 
 public sealed class InvoiceAddressDto
@@ -1568,7 +1536,6 @@ public sealed class InvoiceAddressDto
 using GatewayService.AccountCharge.Application.DTOs;
 using GatewayService.AccountCharge.Domain.Enums;
 
-namespace GatewayService.AccountCharge.Application.DTOs;
 
 public sealed class InvoiceDto
 {
@@ -1586,7 +1553,6 @@ public sealed class InvoiceDto
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\DTOs\PrepaidInvoiceDto.cs ===
 using GatewayService.AccountCharge.Domain.PrepaidInvoices;
 
-namespace GatewayService.AccountCharge.Application.DTOs;
 
 public sealed class PrepaidInvoiceDto
 {
@@ -1611,7 +1577,6 @@ public sealed class PrepaidInvoiceDto
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\DTOs\WalletDto.cs ===
-namespace GatewayService.AccountCharge.Application.DTOs;
 
 // Simplified view of a deposit-capable wallet (currency + optionally network + id)
 public sealed class WalletDto
@@ -1627,7 +1592,6 @@ public sealed class WalletDto
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Prepaid\CreatePrepaidInvoiceCommand.cs ===
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.Prepaid;
 
 public sealed record CreatePrepaidInvoiceCommand(
     string Currency,
@@ -1643,7 +1607,6 @@ using GatewayService.AccountCharge.Domain.PrepaidInvoices;
 using GatewayService.AccountCharge.Domain.Repositories;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.Prepaid;
 
 public sealed class CreatePrepaidInvoiceHandler : IRequestHandler<CreatePrepaidInvoiceCommand, Guid>
 {
@@ -1671,7 +1634,6 @@ public sealed class CreatePrepaidInvoiceHandler : IRequestHandler<CreatePrepaidI
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Prepaid\SyncPrepaidInvoiceCommand.cs ===
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Commands.Prepaid;
 
 public sealed record SyncPrepaidInvoiceCommand(Guid Id) : IRequest<bool>; // true if state changed
 
@@ -1684,7 +1646,6 @@ using GatewayService.AccountCharge.Domain.Repositories;
 using MediatR;
 using Microsoft.Extensions.Logging;
 
-namespace GatewayService.AccountCharge.Application.Commands.Prepaid;
 
 public sealed class SyncPrepaidInvoiceHandler : IRequestHandler<SyncPrepaidInvoiceCommand, bool>
 {
@@ -1840,7 +1801,6 @@ using GatewayService.AccountCharge.Application.DTOs;
 using GatewayService.AccountCharge.Domain.Repositories;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceDetails;
 
 public sealed class GetInvoiceDetailsHandler : IRequestHandler<GetInvoiceDetailsQuery, InvoiceDto>
 {
@@ -1885,7 +1845,6 @@ public sealed class GetInvoiceDetailsHandler : IRequestHandler<GetInvoiceDetails
 using GatewayService.AccountCharge.Application.DTOs;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceDetails;
 
 public sealed record GetInvoiceDetailsQuery(string InvoiceNumber) : IRequest<InvoiceDto>;
 
@@ -1896,7 +1855,6 @@ using GatewayService.AccountCharge.Application.DTOs;
 using GatewayService.AccountCharge.Domain.Repositories;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceStatus;
 
 public sealed class GetInvoiceStatusHandler : IRequestHandler<GetInvoiceStatusQuery, InvoiceDto>
 {
@@ -1942,7 +1900,6 @@ public sealed class GetInvoiceStatusHandler : IRequestHandler<GetInvoiceStatusQu
 using GatewayService.AccountCharge.Application.DTOs;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceStatus;
 
 public sealed record GetInvoiceStatusQuery(Guid InvoiceId) : IRequest<InvoiceDto>;
 
@@ -1959,7 +1916,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceTransactions;
 
 public sealed class GetInvoiceTransactionsHandler
     : IRequestHandler<GetInvoiceTransactionsQuery, IReadOnlyList<IncomingDepositDto>>
@@ -2027,7 +1983,6 @@ using System.Collections.Generic;
 using MediatR;
 using GatewayService.AccountCharge.Application.DTOs;
 
-namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceTransactions;
 
 public sealed record GetInvoiceTransactionsQuery(
     Guid InvoiceId,
@@ -2049,7 +2004,6 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceTransactionsAll;
 
 public sealed class GetInvoiceTransactionsAllHandler
     : IRequestHandler<GetInvoiceTransactionsAllQuery, IReadOnlyList<IncomingDepositDto>>
@@ -2117,7 +2071,6 @@ using System.Collections.Generic;
 using GatewayService.AccountCharge.Application.DTOs;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Queries.GetInvoiceTransactionsAll;
 
 public sealed record GetInvoiceTransactionsAllQuery(Guid InvoiceId)
     : IRequest<IReadOnlyList<IncomingDepositDto>>;
@@ -2127,7 +2080,6 @@ using GatewayService.AccountCharge.Application.DTOs;
 using GatewayService.AccountCharge.Domain.Repositories;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Queries.Prepaid;
 
 public sealed class GetPrepaidInvoiceHandler : IRequestHandler<GetPrepaidInvoiceQuery, PrepaidInvoiceDto>
 {
@@ -2164,7 +2116,6 @@ public sealed class GetPrepaidInvoiceHandler : IRequestHandler<GetPrepaidInvoice
 using GatewayService.AccountCharge.Application.DTOs;
 using MediatR;
 
-namespace GatewayService.AccountCharge.Application.Queries.Prepaid;
 
 public sealed record GetPrepaidInvoiceQuery(Guid Id) : IRequest<PrepaidInvoiceDto>;
 
@@ -2176,7 +2127,6 @@ using GatewayService.AccountCharge.Domain.Repositories;
 using GatewayService.AccountCharge.Domain.ValueObjects;
 using Microsoft.Extensions.Logging;
 
-namespace GatewayService.AccountCharge.Application.Services;
 
 public sealed class DepositMatchingOrchestrator
 {
@@ -2257,7 +2207,6 @@ public sealed class DepositMatchingOrchestrator
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Common\DomainEvent.cs ===
-namespace GatewayService.AccountCharge.Domain.Common;
 
 // Keep domain events free of external dependencies.
 // Application layer can adapt these to MediatR notifications later.
@@ -2269,7 +2218,6 @@ public abstract class DomainEventBase : IDomainEvent
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Common\Entity.cs ===
-namespace GatewayService.AccountCharge.Domain.Common;
 
 public abstract class Entity
 {
@@ -2284,7 +2232,6 @@ public abstract class Entity
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Common\ValueObject.cs ===
-namespace GatewayService.AccountCharge.Domain.Common;
 
 public abstract class ValueObject : IEquatable<ValueObject>
 {
@@ -2314,7 +2261,6 @@ public abstract class ValueObject : IEquatable<ValueObject>
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Enums\InvoiceStatus.cs ===
-namespace GatewayService.AccountCharge.Domain.Enums;
 
 public enum InvoiceStatus
 {
@@ -2327,7 +2273,6 @@ public enum InvoiceStatus
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Exceptions\DomainException.cs ===
-namespace GatewayService.AccountCharge.Domain.Exceptions;
 
 public class DomainException : Exception
 {
@@ -2338,7 +2283,6 @@ public class DomainException : Exception
 using GatewayService.AccountCharge.Domain.Common;
 using GatewayService.AccountCharge.Domain.ValueObjects;
 
-namespace GatewayService.AccountCharge.Domain.Invoices;
 /// <summary>
 /// Deposit that has been matched and applied to an invoice (persisted).
 /// </summary>
@@ -2384,7 +2328,6 @@ using GatewayService.AccountCharge.Domain.Common;
 using GatewayService.AccountCharge.Domain.ValueObjects;
 using GatewayService.AccountCharge.Domain.Enums;
 
-namespace GatewayService.AccountCharge.Domain.Invoices;
 public sealed class InvoiceCreated : DomainEventBase
 {
     public Guid InvoiceId { get; }
@@ -2427,7 +2370,6 @@ using GatewayService.AccountCharge.Domain.ValueObjects;
 
 
 
-namespace GatewayService.AccountCharge.Domain.Invoices;
 /// <summary>
 /// Raw deposit observed from Nobitex GET /users/wallets/deposits/list.
 /// This is an input to the domain (not persisted by itself).
@@ -2468,7 +2410,6 @@ using GatewayService.AccountCharge.Domain.Exceptions;
 using GatewayService.AccountCharge.Domain.ValueObjects;
 
 
-namespace GatewayService.AccountCharge.Domain.Invoices;
 /// <summary>
 /// Aggregate Root for crypto payment through exchange deposit.
 /// </summary>
@@ -2723,7 +2664,6 @@ public sealed class InvoiceAddress
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Invoices\PaymentMatchingOptions.cs ===
-namespace GatewayService.AccountCharge.Domain.Invoices;
 /// <summary>
 /// Controls how deposits are considered "valid" and how tolerance works.
 /// </summary>
@@ -2759,7 +2699,6 @@ public sealed class PaymentMatchingOptions
 using GatewayService.AccountCharge.Domain.Common;
 using GatewayService.AccountCharge.Domain.PrepaidInvoices;
 
-namespace GatewayService.AccountCharge.Domain.PrepaidInvoices;
 
 public sealed class PrepaidInvoice : Entity
 {
@@ -2869,7 +2808,6 @@ public sealed class PrepaidInvoice : Entity
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\PrepaidInvoices\PrepaidInvoiceStatus.cs ===
-namespace GatewayService.AccountCharge.Domain.PrepaidInvoices;
 
 public enum PrepaidInvoiceStatus
 {
@@ -2886,7 +2824,6 @@ using GatewayService.AccountCharge.Domain.Invoices;
 using GatewayService.AccountCharge.Domain.ValueObjects;
 using System.Linq.Expressions;
 
-namespace GatewayService.AccountCharge.Domain.Repositories;
 
 public interface IInvoiceRepository
 {
@@ -2908,7 +2845,6 @@ public interface IInvoiceRepository
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\Repositories\IPrepaidInvoiceRepository.cs ===
 using GatewayService.AccountCharge.Domain.PrepaidInvoices;
 
-namespace GatewayService.AccountCharge.Domain.Repositories;
 
 public interface IPrepaidInvoiceRepository
 {
@@ -2968,7 +2904,6 @@ public sealed class ChainAddress : ValueObject
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\ValueObjects\Money.cs ===
 using GatewayService.AccountCharge.Domain.Common;
 
-namespace GatewayService.AccountCharge.Domain.ValueObjects;
 
 /// <summary>
 /// Monetary amount with currency code (e.g., "BTC", "ETH", "USDT").
@@ -3019,7 +2954,6 @@ public sealed class Money : ValueObject
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\ValueObjects\TransactionHash.cs ===
 using GatewayService.AccountCharge.Domain.Common;
 
-namespace GatewayService.AccountCharge.Domain.ValueObjects;
 
 public sealed class TransactionHash : ValueObject
 {
@@ -3042,7 +2976,6 @@ public sealed class TransactionHash : ValueObject
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Domain\ValueObjects\WalletRef.cs ===
 using GatewayService.AccountCharge.Domain.Common;
 
-namespace GatewayService.AccountCharge.Domain.ValueObjects;
 
 /// <summary>
 /// Reference to the exchange wallet in Nobitex (wallet id + currency code).
@@ -3077,7 +3010,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-namespace GatewayService.AccountCharge.Infrastructure.Background;
 
 public sealed class NobitexPollingService : BackgroundService
 {
@@ -3156,7 +3088,6 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-namespace GatewayService.AccountCharge.Infrastructure.Background;
 
 public sealed class PrepaidInvoicePollingService : BackgroundService
 {
@@ -3201,7 +3132,6 @@ public sealed class PrepaidInvoicePollingService : BackgroundService
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Http\Models\NobitexDepositsModels.cs ===
 using System.Text.Json.Serialization;
 
-namespace GatewayService.AccountCharge.Infrastructure.Http.Models;
 
 internal sealed class NobitexDepositsResponse
 {
@@ -3240,7 +3170,6 @@ internal sealed class NobitexTransaction
 using System.Net.Http.Json;
 using GatewayService.AccountCharge.Application.Abstractions;
 
-namespace GatewayService.AccountCharge.Infrastructure.Http;
 
 internal sealed class AccountingClient(HttpClient http) : IAccountingClient
 {
@@ -3286,7 +3215,6 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using System.Net.Http.Json;
 
-namespace GatewayService.AccountCharge.Infrastructure.Http;
 
 
 public sealed class NobitexClient : INobitexClient
@@ -3573,7 +3501,6 @@ public sealed class NobitexClient : INobitexClient
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Options\AccountingOptionsConfig.cs ===
 // D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Options\AccountingOptionsConfig.cs
-namespace GatewayService.AccountCharge.Infrastructure.Options;
 
 public sealed class AccountingOptionsConfig
 {
@@ -3584,7 +3511,6 @@ public sealed class AccountingOptionsConfig
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Options\NobitexOptions.cs ===
-namespace GatewayService.AccountCharge.Infrastructure.Options;
 
 public sealed class NobitexOptionsConfig
 {
@@ -3595,7 +3521,6 @@ public sealed class NobitexOptionsConfig
 }
 
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Options\PaymentMatchingOptionsConfig.cs ===
-namespace GatewayService.AccountCharge.Infrastructure.Options;
 
 public sealed class PaymentMatchingOptionsConfig
 {
@@ -3624,7 +3549,6 @@ using GatewayService.AccountCharge.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
-namespace GatewayService.AccountCharge.Infrastructure.Persistence.Configurations;
 
 public sealed class InvoiceConfiguration : IEntityTypeConfiguration<Invoice>
 {
@@ -3777,7 +3701,6 @@ using GatewayService.AccountCharge.Domain.PrepaidInvoices;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
-namespace GatewayService.AccountCharge.Infrastructure.Persistence.Configurations;
 
 public sealed class PrepaidInvoiceConfiguration : IEntityTypeConfiguration<PrepaidInvoice>
 {
@@ -3815,7 +3738,6 @@ public sealed class PrepaidInvoiceConfiguration : IEntityTypeConfiguration<Prepa
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Persistence\AccountChargeDb.cs ===
 using Microsoft.EntityFrameworkCore;
 
-namespace GatewayService.AccountCharge.Infrastructure.Persistence;
 
 /// <summary>
 /// EF Core DbContext wired to Domain aggregates (persistence-ignorant).
@@ -3841,7 +3763,6 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Design;
 using Microsoft.Extensions.Configuration;
 
-namespace GatewayService.AccountCharge.Infrastructure.Persistence
 {
     // Match your actual DbContext type name from the error: AccountChargeDb
     public sealed class AccountChargeDbFactory : IDesignTimeDbContextFactory<AccountChargeDb>
@@ -3883,7 +3804,6 @@ namespace GatewayService.AccountCharge.Infrastructure.Persistence
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Persistence\UnitOfWork.cs ===
 using GatewayService.AccountCharge.Application.Abstractions;
 
-namespace GatewayService.AccountCharge.Infrastructure.Persistence;
 
 public sealed class UnitOfWork : IUnitOfWork
 {
@@ -3904,7 +3824,6 @@ using GatewayService.AccountCharge.Application.Abstractions;
 using GatewayService.AccountCharge.Domain.Invoices;
 using Microsoft.Extensions.Options;
 
-namespace GatewayService.AccountCharge.Infrastructure.Providers;
 
 public sealed class ConfigPaymentMatchingOptionsProvider : IPaymentMatchingOptionsProvider
 {
@@ -3951,7 +3870,6 @@ using GatewayService.AccountCharge.Domain.Repositories;
 using GatewayService.AccountCharge.Domain.ValueObjects;
 using Microsoft.EntityFrameworkCore;
 
-namespace GatewayService.AccountCharge.Infrastructure.Repositories;
 
 public sealed class EfInvoiceRepository : IInvoiceRepository
 {
@@ -4052,7 +3970,6 @@ using GatewayService.AccountCharge.Domain.PrepaidInvoices;
 using GatewayService.AccountCharge.Domain.Repositories;
 using Microsoft.EntityFrameworkCore;
 
-namespace GatewayService.AccountCharge.Infrastructure.Repositories;
 
 public sealed class EfPrepaidInvoiceRepository : IPrepaidInvoiceRepository
 {
@@ -4082,7 +3999,6 @@ public sealed class EfPrepaidInvoiceRepository : IPrepaidInvoiceRepository
 === FILE: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Services\DateTicksInvoiceNumberGenerator.cs ===
 using GatewayService.AccountCharge.Application.Abstractions;
 
-namespace GatewayService.AccountCharge.Infrastructure.Services;
 
 public sealed class DateTicksInvoiceNumberGenerator : IInvoiceNumberGenerator
 {
@@ -4105,7 +4021,6 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
-namespace GatewayService.AccountCharge.Infrastructure;
 
 public static class AccountingRegistration
 {
@@ -4154,7 +4069,6 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
-namespace GatewayService.AccountCharge.Infrastructure;
 
 public static class DependencyInjection
 {
@@ -4261,7 +4175,6 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 
-namespace GatewayService.AccountCharge.Infrastructure;
 
 public static class NobitexRegistration
 {

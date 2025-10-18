@@ -4,7 +4,7 @@ using GatewayService.AccountCharge.Application.Abstractions;
 
 namespace GatewayService.AccountCharge.Infrastructure.Http;
 
-internal sealed class AccountingClient(HttpClient http) : IAccountingClient
+public sealed class AccountingClient(HttpClient http) : IAccountingClient
 {
     private sealed record CreateAccountingInvoiceRequest(
         Guid ExternalCustomerId, int Tag, decimal Amount, string Currency, DateTimeOffset OccurredAt);
