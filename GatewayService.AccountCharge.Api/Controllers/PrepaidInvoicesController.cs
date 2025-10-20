@@ -1,14 +1,17 @@
-﻿using System.ComponentModel.DataAnnotations;
+﻿// File: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Api\Controllers\PrepaidInvoicesController.cs
+using System.ComponentModel.DataAnnotations;
 using System.Net.Mime;
 using Asp.Versioning;
 using GatewayService.AccountCharge.Application.Commands.Prepaid;
 using GatewayService.AccountCharge.Application.DTOs;
 using GatewayService.AccountCharge.Application.Queries.Prepaid;
 using MediatR;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace GatewayService.AccountCharge.Api.Controllers;
 
+[Authorize] 
 [ApiController]
 [ApiVersion("1.0")]
 [Route("api/v{version:apiVersion}/prepaid-invoices")]
@@ -63,7 +66,10 @@ public sealed class PrepaidInvoicesController : ControllerBase
             var dto = await _sender.Send(new GetPrepaidInvoiceQuery(id), ct);
             return Ok(dto);
         }
-        catch (KeyNotFoundException) { return NotFound(); }
+        catch (KeyNotFoundException)
+        {
+            return NotFound();
+        }
     }
 
     [HttpPost("{id:guid}/sync")]
@@ -77,6 +83,9 @@ public sealed class PrepaidInvoicesController : ControllerBase
             var dto = await _sender.Send(new GetPrepaidInvoiceQuery(id), ct);
             return Ok(dto);
         }
-        catch (KeyNotFoundException) { return NotFound(); }
+        catch (KeyNotFoundException)
+        {
+            return NotFound();
+        }
     }
 }

@@ -1,4 +1,4 @@
-﻿// D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Http\AccountingClient.cs
+﻿// File: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Infrastructure\Http\AccountingClient.cs
 using System.Net.Http.Json;
 using GatewayService.AccountCharge.Application.Abstractions;
 
@@ -19,13 +19,14 @@ public sealed class AccountingClient(HttpClient http) : IAccountingClient
     {
         var body = new CreateAccountingInvoiceRequest(
             ExternalCustomerId: externalCustomerId,
-            Tag: 1,                       // deposit
+            Tag: 1, // deposit
             Amount: amount,
             Currency: currency,
             OccurredAt: occurredAt
         );
 
-        using var req = new HttpRequestMessage(HttpMethod.Post, "api/v1/invoices")
+        // ✅ مسیر درست — در AccountingService مسیر با "me" است
+        using var req = new HttpRequestMessage(HttpMethod.Post, "api/v1/invoices/me")
         {
             Content = JsonContent.Create(body)
         };

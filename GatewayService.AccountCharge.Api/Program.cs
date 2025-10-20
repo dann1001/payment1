@@ -1,11 +1,17 @@
 ﻿// File: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Api\Program.cs
+using System;
+using System.Text;
 using Asp.Versioning;
 using Asp.Versioning.ApiExplorer;
 using GatewayService.AccountCharge.Application;
 using GatewayService.AccountCharge.Infrastructure;
+using GatewayService.AccountCharge.Infrastructure.Http;
 using GatewayService.AccountCharge.Infrastructure.Options;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -15,13 +21,31 @@ builder.Services.Configure<NobitexOptionsConfig>(nobitexSection);
 
 var tokenFromEnv = Environment.GetEnvironmentVariable("NOBITEX_API_TOKEN");
 if (string.IsNullOrWhiteSpace(nobitexSection["Token"]) && !string.IsNullOrWhiteSpace(tokenFromEnv))
-{
     builder.Configuration["Nobitex:Token"] = tokenFromEnv;
-}
 
 // ===================== Config: PriceQuote =====================
 var priceSection = builder.Configuration.GetSection(PriceQuoteOptionsConfig.SectionName);
 builder.Services.Configure<PriceQuoteOptionsConfig>(priceSection);
+
+// ===================== JWT Authentication =====================
+var jwtSection = builder.Configuration.GetSection("Jwt");
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(opt =>
+    {
+        opt.RequireHttpsMetadata = false;
+        opt.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ValidIssuer = jwtSection["Issuer"],
+            ValidAudience = jwtSection["Audience"],
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(jwtSection["SigningKey"]!))
+        };
+        opt.MapInboundClaims = false;
+    });
 
 // ===================== Services =====================
 builder.Services.AddApplication();
@@ -36,29 +60,53 @@ builder.Services
         o.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter());
     });
 
-// Swagger (base)
+// ===================== Swagger (with JWT Auth button) =====================
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
-
-// API Versioning (Asp.Versioning)
-builder.Services.AddApiVersioning(options =>
+builder.Services.AddSwaggerGen(opt =>
 {
-    options.DefaultApiVersion = new ApiVersion(1, 0);
-    options.AssumeDefaultVersionWhenUnspecified = true;
-    options.ReportApiVersions = true;
+    opt.SwaggerDoc("v1", new OpenApiInfo { Title = "GatewayService.AccountCharge API", Version = "v1" });
 
-    options.ApiVersionReader = ApiVersionReader.Combine(
+    // 🔐 Add JWT authentication support to Swagger
+    var securityScheme = new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Description = "Enter JWT token as: **Bearer {token}**",
+        In = ParameterLocation.Header,
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        Reference = new OpenApiReference
+        {
+            Type = ReferenceType.SecurityScheme,
+            Id = "Bearer"
+        }
+    };
+
+    opt.AddSecurityDefinition("Bearer", securityScheme);
+    opt.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        { securityScheme, Array.Empty<string>() }
+    });
+});
+
+// ===================== API Versioning =====================
+builder.Services.AddApiVersioning(opt =>
+{
+    opt.DefaultApiVersion = new ApiVersion(1, 0);
+    opt.AssumeDefaultVersionWhenUnspecified = true;
+    opt.ReportApiVersions = true;
+    opt.ApiVersionReader = ApiVersionReader.Combine(
         new UrlSegmentApiVersionReader(),
         new QueryStringApiVersionReader("api-version"),
         new HeaderApiVersionReader("X-Api-Version"));
 })
-.AddApiExplorer(options =>
+.AddApiExplorer(opt =>
 {
-    options.GroupNameFormat = "'v'VVV";
-    options.SubstituteApiVersionInUrl = true;
+    opt.GroupNameFormat = "'v'VVV";
+    opt.SubstituteApiVersionInUrl = true;
 });
 
-// CORS
+// ===================== CORS =====================
 builder.Services.AddCors(opt =>
 {
     opt.AddPolicy("InnerNetwork", b =>
@@ -67,41 +115,32 @@ builder.Services.AddCors(opt =>
          .AllowAnyMethod());
 });
 
-// ------------ HttpClients ------------
-builder.Services.AddHttpClient<GatewayService.AccountCharge.Application.Abstractions.INobitexClient, GatewayService.AccountCharge.Infrastructure.Http.NobitexClient>(http =>
+// ===================== HttpClients =====================
+var useFakeQuote = builder.Configuration.GetValue<bool>("UseFakePriceQuote");
+if (useFakeQuote)
 {
-    var baseUrl = nobitexSection["BaseUrl"] ?? "https://apiv2.nobitex.ir";
-    http.BaseAddress = new Uri(baseUrl, UriKind.Absolute);
-    var ua = nobitexSection["UserAgent"];
-    if (!string.IsNullOrWhiteSpace(ua)) http.DefaultRequestHeaders.UserAgent.ParseAdd(ua);
-    var token = builder.Configuration["Nobitex:Token"];
-    if (!string.IsNullOrWhiteSpace(token))
-        http.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", $"Token {token}");
-});
-
-builder.Services.AddHttpClient<GatewayService.AccountCharge.Application.Abstractions.IAccountingClient, GatewayService.AccountCharge.Infrastructure.Http.AccountingClient>(http =>
+    builder.Services.AddSingleton<GatewayService.AccountCharge.Application.Abstractions.IPriceQuoteClient, FakePriceQuoteClient>();
+    Console.WriteLine("[Startup] Using FakePriceQuoteClient (mocked USDT rates).");
+}
+else
 {
-    var baseUrl = builder.Configuration["Accounting:BaseUrl"] ?? "https://localhost:7123/";
-    http.BaseAddress = new Uri(baseUrl, UriKind.Absolute);
-    var ua = builder.Configuration["Accounting:UserAgent"];
-    if (!string.IsNullOrWhiteSpace(ua)) http.DefaultRequestHeaders.UserAgent.ParseAdd(ua);
-});
-
-// ⬇️ PriceQuote client (سرویس همکار)
-builder.Services.AddHttpClient<GatewayService.AccountCharge.Application.Abstractions.IPriceQuoteClient, GatewayService.AccountCharge.Infrastructure.Http.PriceQuoteClient>(http =>
-{
-    var baseUrl = priceSection["BaseUrl"];
-    if (string.IsNullOrWhiteSpace(baseUrl))
-        throw new InvalidOperationException("PriceQuote:BaseUrl is required.");
-    http.BaseAddress = new Uri(baseUrl, UriKind.Absolute);
-    var ua = priceSection["UserAgent"];
-    if (!string.IsNullOrWhiteSpace(ua)) http.DefaultRequestHeaders.UserAgent.ParseAdd(ua);
-});
+    builder.Services.AddHttpClient<GatewayService.AccountCharge.Application.Abstractions.IPriceQuoteClient, PriceQuoteClient>(http =>
+    {
+        var baseUrl = priceSection["BaseUrl"];
+        if (string.IsNullOrWhiteSpace(baseUrl))
+            throw new InvalidOperationException("PriceQuote:BaseUrl is required.");
+        http.BaseAddress = new Uri(baseUrl, UriKind.Absolute);
+        var ua = priceSection["UserAgent"];
+        if (!string.IsNullOrWhiteSpace(ua)) http.DefaultRequestHeaders.UserAgent.ParseAdd(ua);
+    });
+}
 
 var app = builder.Build();
 
 // ===================== Middleware =====================
-app.UseCors("InnerNetwork"); // <-- از سیاست تعریف‌شده استفاده کن
+app.UseCors("InnerNetwork");
+app.UseAuthentication();
+app.UseAuthorization();
 
 app.UseExceptionHandler(a =>
 {
@@ -118,20 +157,15 @@ app.UseExceptionHandler(a =>
     });
 });
 
-var disableHttpsRedirect = builder.Configuration.GetValue<bool>("DisableHttpsRedirection");
-if (!disableHttpsRedirect && app.Environment.IsProduction())
-{
-    app.UseHttpsRedirection();
-}
-
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
-    var provider = app.Services.GetRequiredService<IApiVersionDescriptionProvider>();
-    app.UseSwaggerUI(options =>
+    app.UseSwaggerUI(opt =>
     {
-        foreach (var desc in provider.ApiVersionDescriptions)
-            options.SwaggerEndpoint($"/swagger/{desc.GroupName}/swagger.json", desc.GroupName.ToUpperInvariant());
+        opt.SwaggerEndpoint("/swagger/v1/swagger.json", "v1");
+        opt.DisplayRequestDuration();
+        opt.DefaultModelExpandDepth(1);
+        opt.DocExpansion(Swashbuckle.AspNetCore.SwaggerUI.DocExpansion.None);
     });
 }
 

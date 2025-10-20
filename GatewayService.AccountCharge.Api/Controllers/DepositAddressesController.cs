@@ -40,3 +40,4 @@ public sealed class DepositsController : ControllerBase
         return Ok(result);
     }
 }
+   

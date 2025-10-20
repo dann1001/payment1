@@ -1,14 +1,16 @@
-﻿using System.Text.Json;
+﻿// File: GatewayService.AccountCharge.Infrastructure/Http/NobitexClient.cs
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text.Json;
 using GatewayService.AccountCharge.Application.Abstractions;
-using GatewayService.AccountCharge.Application.Common; // <-- use AssetMapper
+using GatewayService.AccountCharge.Application.Common;
 using GatewayService.AccountCharge.Application.DTOs;
 using GatewayService.AccountCharge.Infrastructure.Options;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using System.Net.Http.Json;
 
 namespace GatewayService.AccountCharge.Infrastructure.Http;
-
 
 public sealed class NobitexClient : INobitexClient
 {
@@ -23,9 +25,28 @@ public sealed class NobitexClient : INobitexClient
         _log = log;
     }
 
+    // ---------- Single Source of Truth برای Authorization ----------
+    private string GetTokenOrThrow()
+    {
+        var token = _cfg.Token ?? Environment.GetEnvironmentVariable("NOBITEX_API_TOKEN");
+        token = token?.Trim();
+        if (string.IsNullOrWhiteSpace(token))
+            throw new InvalidOperationException("Nobitex token is missing. Set Nobitex:Token or NOBITEX_API_TOKEN.");
+        return token!;
+    }
+
+    private HttpRequestMessage BuildRequest(HttpMethod method, string url, HttpContent? content = null)
+    {
+        var req = new HttpRequestMessage(method, url) { Content = content };
+        req.Headers.Authorization = new AuthenticationHeaderValue("Token", GetTokenOrThrow());
+        req.Headers.Accept.Clear();
+        req.Headers.Accept.ParseAdd("application/json");
+        return req;
+    }
+
     public async Task<IReadOnlyList<WalletDto>> GetWalletsAsync(CancellationToken ct)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, "/users/wallets/list");
+        using var req = BuildRequest(HttpMethod.Get, "/users/wallets/list");
         using var res = await _http.SendAsync(req, ct);
         await EnsureSuccessWithRateNotes(res, ct);
 
@@ -48,7 +69,6 @@ public sealed class NobitexClient : INobitexClient
                 var id = ReadIntFlexible(w, "id");
                 if (id == 0) id = ReadIntFlexible(w, "wallet");
 
-                // Keep lower-case for provider interactions; map to symbol only when building domain DTOs.
                 var currencyLower = (ReadString(w, "currency") ?? string.Empty).Trim().ToLowerInvariant();
 
                 string? network = null;
@@ -65,7 +85,7 @@ public sealed class NobitexClient : INobitexClient
                 list.Add(new WalletDto
                 {
                     Id = id,
-                    Currency = currencyLower, // keep as-is for downstream provider calls
+                    Currency = currencyLower,
                     Network = network,
                     HasDepositAddress = !string.IsNullOrWhiteSpace(depAddr),
                     DepositAddress = string.IsNullOrWhiteSpace(depAddr) ? null : depAddr!.Trim(),
@@ -88,11 +108,7 @@ public sealed class NobitexClient : INobitexClient
             ["network"] = networkPayload
         };
 
-        using var req = new HttpRequestMessage(HttpMethod.Post, "/users/wallets/generate-address")
-        {
-            Content = JsonContent.Create(payload)
-        };
-
+        using var req = BuildRequest(HttpMethod.Post, "/users/wallets/generate-address", JsonContent.Create(payload));
         using var res = await _http.SendAsync(req, ct);
         await EnsureSuccessWithRateNotes(res, ct);
 
@@ -121,8 +137,8 @@ public sealed class NobitexClient : INobitexClient
         return new GeneratedAddressDto
         {
             WalletId = walletId,
-            Currency = currencyLower,                     // provider case
-            Network = networkPayload,                    // as requested
+            Currency = currencyLower,
+            Network = networkPayload,
             Address = address.Trim(),
             Tag = string.IsNullOrWhiteSpace(tag) ? null : tag.Trim(),
             CreatedAt = DateTimeOffset.UtcNow
@@ -135,7 +151,7 @@ public sealed class NobitexClient : INobitexClient
         if (since.HasValue)
             url += $"&startDate={Uri.EscapeDataString(since.Value.UtcDateTime.ToString("o"))}";
 
-        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        using var req = BuildRequest(HttpMethod.Get, url);
         using var res = await _http.SendAsync(req, ct);
         await EnsureSuccessWithRateNotes(res, ct);
 
@@ -160,9 +176,8 @@ public sealed class NobitexClient : INobitexClient
                 var memo = ReadString(d, "memo") ?? ReadString(d, "destinationTag") ?? ReadString(d, "tag");
                 var symbol = ReadString(d, "currencySymbol");
                 var name = ReadString(d, "currency");
-                var currency = AssetMapper.NormalizeCurrencyFromProvider(symbol, name); // <-- key change
+                var currency = AssetMapper.NormalizeCurrencyFromProvider(symbol, name);
 
-                // network may be absent on deposits; try field, else infer from explorer URL
                 var networkRaw = ReadString(d, "network");
                 var explorerUrl = ReadString(d, "blockchainUrl");
                 var network = AssetMapper.NormalizeNetwork(networkRaw) ?? AssetMapper.InferNetworkFromUrl(explorerUrl);
@@ -171,14 +186,12 @@ public sealed class NobitexClient : INobitexClient
                 var conf = ReadIntFlexible(d, "confirmations");
                 var reqConf = ReadIntFlexible(d, "requiredConfirmations");
 
-                // Prefer 'date'; fallback to nested 'transaction.created_at'
                 var created =
                     ReadDateTimeOffsetFlexible(d, "date") ??
                     ReadDateTimeOffsetFlexibleNested(d, "transaction", "created_at") ??
                     ReadDateTimeOffsetFlexible(d, "created_at") ??
                     DateTimeOffset.UtcNow;
 
-                // Prefer explicit confirmed flag: isConfirmed/confirmed/wasConfirmed
                 var confirmed =
                     ReadBoolFlexible(d, "isConfirmed")
                     ?? ReadBoolFlexible(d, "confirmed")
@@ -192,8 +205,8 @@ public sealed class NobitexClient : INobitexClient
                     Tag = string.IsNullOrWhiteSpace(memo) ? null : memo,
                     TxHash = txHash,
                     Amount = amt,
-                    Currency = currency,   // <-- canonical symbol (e.g., "BNB")
-                    Network = network,    // normalized or null
+                    Currency = currency,
+                    Network = network,
                     Confirmations = conf,
                     RequiredConfirmations = reqConf,
                     CreatedAt = created,
@@ -205,22 +218,12 @@ public sealed class NobitexClient : INobitexClient
         return list;
     }
 
-    // -----------------------
-    // Helpers
-    // -----------------------
-
+    // ---------------- Helpers ----------------
     private static bool IsOk(JsonElement root)
-    {
-        var status = ReadString(root, "status");
-        return string.Equals(status, "ok", StringComparison.OrdinalIgnoreCase);
-    }
+        => string.Equals(ReadString(root, "status"), "ok", StringComparison.OrdinalIgnoreCase);
 
     private static (string? code, string? message) ReadError(JsonElement root)
-    {
-        var code = ReadString(root, "code");
-        var msg = ReadString(root, "message");
-        return (code, msg);
-    }
+        => (ReadString(root, "code"), ReadString(root, "message"));
 
     private static string? ReadString(JsonElement e, string name)
         => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
@@ -287,7 +290,7 @@ public sealed class NobitexClient : INobitexClient
         {
             var body = await res.Content.ReadAsStringAsync(ct);
             _log.LogError("Nobitex HTTP error {Status}: {Body}", (int)res.StatusCode, body);
-            res.EnsureSuccessStatusCode();
+            res.EnsureSuccessStatusCode(); // throws with the 401/4xx body logged above
         }
     }
 }
