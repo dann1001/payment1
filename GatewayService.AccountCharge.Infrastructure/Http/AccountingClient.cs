@@ -6,27 +6,39 @@ namespace GatewayService.AccountCharge.Infrastructure.Http;
 
 public sealed class AccountingClient(HttpClient http) : IAccountingClient
 {
-    private sealed record CreateAccountingInvoiceRequest(
-        Guid ExternalCustomerId, int Tag, decimal Amount, string Currency, DateTimeOffset OccurredAt);
+    private sealed record DepositAppliedRequest(
+        string PaymentId,
+        int? ExternalCustomerId, // optional; null => PartyResolver
+        decimal Amount,
+        string Currency,
+        DateTimeOffset OccurredAtUtc,
+        string? Gateway,
+        string? Address,
+        string? TxHash,
+        string? CorrelationId
+    );
 
     public async Task CreateDepositAsync(
-        Guid externalCustomerId,
+        Guid externalCustomerId,          // ⚠️ هنوز امضای Interface اینجوریه؛ می‌تونیم این Guid رو به عنوان Correlation استفاده کنیم
         decimal amount,
         string currency,
         DateTimeOffset occurredAt,
         string? idempotencyKey,
         CancellationToken ct)
     {
-        var body = new CreateAccountingInvoiceRequest(
-            ExternalCustomerId: externalCustomerId,
-            Tag: 1, // deposit
+        var body = new DepositAppliedRequest(
+            PaymentId: idempotencyKey ?? $"dep-{externalCustomerId}-{occurredAt:yyyyMMddHHmmss}",
+            ExternalCustomerId: null,                  // ✅ PartyResolver در Accounting از JWT به Party می‌رسد
             Amount: amount,
             Currency: currency,
-            OccurredAt: occurredAt
+            OccurredAtUtc: occurredAt,
+            Gateway: "Nobitex",
+            Address: null,                             // اگر داری پاس بده
+            TxHash: idempotencyKey,                    // همون txhash
+            CorrelationId: externalCustomerId.ToString()
         );
 
-        // ✅ مسیر درست — در AccountingService مسیر با "me" است
-        using var req = new HttpRequestMessage(HttpMethod.Post, "api/v1/invoices/me")
+        using var req = new HttpRequestMessage(HttpMethod.Post, "api/v1/deposits/applied")
         {
             Content = JsonContent.Create(body)
         };
