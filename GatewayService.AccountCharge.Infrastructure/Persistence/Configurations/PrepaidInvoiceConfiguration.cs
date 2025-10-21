@@ -1,4 +1,5 @@
-﻿using GatewayService.AccountCharge.Domain.PrepaidInvoices;
+﻿// File: GatewayService.AccountCharge.Infrastructure/Persistence/Configurations/PrepaidInvoiceConfiguration.cs
+using GatewayService.AccountCharge.Domain.PrepaidInvoices;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 
@@ -16,7 +17,7 @@ public sealed class PrepaidInvoiceConfiguration : IEntityTypeConfiguration<Prepa
         b.Property(x => x.Currency).HasMaxLength(16).IsRequired();
         b.Property(x => x.Network).HasMaxLength(32);
         b.Property(x => x.TxHash).HasMaxLength(128).IsRequired();
-        b.HasIndex(x => x.TxHash).IsUnique();
+        b.HasIndex(x => x.TxHash).IsUnique(); // ✅ enforce unique tx in gateway too
 
         b.Property(x => x.Status).HasConversion<string>().HasMaxLength(64).IsRequired();
         b.Property(x => x.CreatedAt).IsRequired();

@@ -1,4 +1,5 @@
-﻿// File: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Api\Controllers\PrepaidInvoicesController.cs
+﻿// File: GatewayService.AccountCharge.Api/Controllers/PrepaidInvoicesController.cs
+using System;
 using System.ComponentModel.DataAnnotations;
 using System.Net.Mime;
 using Asp.Versioning;
@@ -9,83 +10,107 @@ using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
-namespace GatewayService.AccountCharge.Api.Controllers;
-
-[Authorize] 
-[ApiController]
-[ApiVersion("1.0")]
-[Route("api/v{version:apiVersion}/prepaid-invoices")]
-[Produces(MediaTypeNames.Application.Json)]
-public sealed class PrepaidInvoicesController : ControllerBase
+namespace GatewayService.AccountCharge.Api.Controllers
 {
-    private readonly ISender _sender;
-    public PrepaidInvoicesController(ISender sender) => _sender = sender;
-
-    public sealed class CreateRequest
+    [Authorize]
+    [ApiController]
+    [ApiVersion("1.0")]
+    [Route("api/v{version:apiVersion}/prepaid-invoices")]
+    [Produces(MediaTypeNames.Application.Json)]
+    public sealed class PrepaidInvoicesController : ControllerBase
     {
-        [Required] public string Currency { get; set; } = default!;
-        public string? Network { get; set; }           // optional
-        [Required] public string TxHash { get; set; } = default!;
-        public string? CustomerId { get; set; }
-        public DateTimeOffset? ExpiresAtUtc { get; set; }
-    }
+        private readonly ISender _sender;
+        public PrepaidInvoicesController(ISender sender) => _sender = sender;
 
-    [HttpPost]
-    [ProducesResponseType(typeof(PrepaidInvoiceDto), StatusCodes.Status201Created)]
-    public async Task<IActionResult> Create([FromBody] CreateRequest req, CancellationToken ct)
-    {
-        TimeSpan? ttl = null;
-        if (req.ExpiresAtUtc.HasValue)
+        public sealed class CreateRequest
         {
-            var delta = req.ExpiresAtUtc.Value - DateTimeOffset.UtcNow;
-            if (delta > TimeSpan.Zero) ttl = delta;
+            [Required] public string Currency { get; set; } = default!;
+            public string? Network { get; set; }
+            [Required] public string TxHash { get; set; } = default!;
+            public string? CustomerId { get; set; }
+            public DateTimeOffset? ExpiresAtUtc { get; set; }
         }
 
-        var id = await _sender.Send(new CreatePrepaidInvoiceCommand(
-            Currency: req.Currency,
-            Network: req.Network,
-            TxHash: req.TxHash,
-            CustomerId: req.CustomerId,
-            Ttl: ttl
-        ), ct);
-
-        // Try immediate sync (best-effort)
-        await _sender.Send(new SyncPrepaidInvoiceCommand(id), ct);
-
-        var dto = await _sender.Send(new GetPrepaidInvoiceQuery(id), ct);
-        return CreatedAtAction(nameof(GetById), new { version = "1.0", id }, dto);
-    }
-
-    [HttpGet("{id:guid}")]
-    [ProducesResponseType(typeof(PrepaidInvoiceDto), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> GetById([FromRoute] Guid id, CancellationToken ct)
-    {
-        try
+        [HttpPost]
+        [ProducesResponseType(typeof(PrepaidInvoiceDto), StatusCodes.Status201Created)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status409Conflict)]
+        public async Task<IActionResult> Create([FromBody] CreateRequest req, CancellationToken ct)
         {
+            TimeSpan? ttl = null;
+            if (req.ExpiresAtUtc.HasValue)
+            {
+                var delta = req.ExpiresAtUtc.Value - DateTimeOffset.UtcNow;
+                if (delta > TimeSpan.Zero) ttl = delta;
+            }
+
+            var id = await _sender.Send(new CreatePrepaidInvoiceCommand(
+                Currency: req.Currency,
+                Network: req.Network,
+                TxHash: req.TxHash,
+                CustomerId: req.CustomerId,
+                Ttl: ttl
+            ), ct);
+
+            // Explicit generic Send<T> to avoid falling back to object
+            var sync = await _sender.Send<SyncPrepaidInvoiceResult>(new SyncPrepaidInvoiceCommand(id), ct);
+            if (sync.Duplicate)
+            {
+                return Conflict(new
+                {
+                    code = "DuplicateTx",
+                    prepaidInvoiceId = id,
+                    accountingInvoiceId = sync.AccountingInvoiceId,
+                    message = "Transaction already exists."
+                });
+            }
+
             var dto = await _sender.Send(new GetPrepaidInvoiceQuery(id), ct);
-            return Ok(dto);
+            return CreatedAtAction(nameof(GetById), new { version = "1.0", id }, dto);
         }
-        catch (KeyNotFoundException)
-        {
-            return NotFound();
-        }
-    }
 
-    [HttpPost("{id:guid}/sync")]
-    [ProducesResponseType(typeof(PrepaidInvoiceDto), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Sync([FromRoute] Guid id, CancellationToken ct)
-    {
-        try
+        [HttpGet("{id:guid}")]
+        [ProducesResponseType(typeof(PrepaidInvoiceDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> GetById([FromRoute] Guid id, CancellationToken ct)
         {
-            await _sender.Send(new SyncPrepaidInvoiceCommand(id), ct);
-            var dto = await _sender.Send(new GetPrepaidInvoiceQuery(id), ct);
-            return Ok(dto);
+            try
+            {
+                var dto = await _sender.Send(new GetPrepaidInvoiceQuery(id), ct);
+                return Ok(dto);
+            }
+            catch (KeyNotFoundException)
+            {
+                return NotFound();
+            }
         }
-        catch (KeyNotFoundException)
+
+        [HttpPost("{id:guid}/sync")]
+        [ProducesResponseType(typeof(PrepaidInvoiceDto), StatusCodes.Status200OK)]
+        [ProducesResponseType(typeof(object), StatusCodes.Status409Conflict)]
+        [ProducesResponseType(StatusCodes.Status404NotFound)]
+        public async Task<IActionResult> Sync([FromRoute] Guid id, CancellationToken ct)
         {
-            return NotFound();
+            try
+            {
+                var sync = await _sender.Send<SyncPrepaidInvoiceResult>(new SyncPrepaidInvoiceCommand(id), ct);
+                if (sync.Duplicate)
+                {
+                    return Conflict(new
+                    {
+                        code = "DuplicateTx",
+                        prepaidInvoiceId = id,
+                        accountingInvoiceId = sync.AccountingInvoiceId,
+                        message = "Transaction already exists."
+                    });
+                }
+
+                var dto = await _sender.Send(new GetPrepaidInvoiceQuery(id), ct);
+                return Ok(dto);
+            }
+            catch (KeyNotFoundException)
+            {
+                return NotFound();
+            }
         }
     }
 }

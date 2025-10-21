@@ -1,4 +1,4 @@
-﻿// File: D:\GatewayService.AccountCharge\GatewayService.AccountCharge.Application\Prepaid\SyncPrepaidInvoiceHandler.cs
+﻿// File: GatewayService.AccountCharge.Application/Commands/Prepaid/SyncPrepaidInvoiceHandler.cs
 using System;
 using System.Linq;
 using System.Threading;
@@ -13,14 +13,15 @@ using Microsoft.Extensions.Logging;
 
 namespace GatewayService.AccountCharge.Application.Commands.Prepaid
 {
-    public sealed class SyncPrepaidInvoiceHandler : IRequestHandler<SyncPrepaidInvoiceCommand, bool>
+    public sealed class SyncPrepaidInvoiceHandler
+        : IRequestHandler<SyncPrepaidInvoiceCommand, SyncPrepaidInvoiceResult>
     {
         private readonly IPrepaidInvoiceRepository _repo;
-        private readonly IInvoiceRepository _legacyInvoices; // legacy skip
+        private readonly IInvoiceRepository _legacyInvoices;
         private readonly INobitexClient _nobitex;
         private readonly IPaymentMatchingOptionsProvider _opts;
         private readonly IAccountingClient _accounting;
-        private readonly IPriceQuoteClient _prices;          // ⬅️ اضافه شد
+        private readonly IPriceQuoteClient _prices;
         private readonly IUnitOfWork _uow;
         private readonly ILogger<SyncPrepaidInvoiceHandler> _log;
 
@@ -33,7 +34,7 @@ namespace GatewayService.AccountCharge.Application.Commands.Prepaid
             INobitexClient nobitex,
             IPaymentMatchingOptionsProvider opts,
             IAccountingClient accounting,
-            IPriceQuoteClient prices,                         // ⬅️ اضافه شد
+            IPriceQuoteClient prices,
             IUnitOfWork uow,
             ILogger<SyncPrepaidInvoiceHandler> log)
         {
@@ -42,14 +43,15 @@ namespace GatewayService.AccountCharge.Application.Commands.Prepaid
             _nobitex = nobitex;
             _opts = opts;
             _accounting = accounting;
-            _prices = prices;                                 // ⬅️ اضافه شد
+            _prices = prices;
             _uow = uow;
             _log = log;
         }
 
-        public async Task<bool> Handle(SyncPrepaidInvoiceCommand request, CancellationToken ct)
+        public async Task<SyncPrepaidInvoiceResult> Handle(SyncPrepaidInvoiceCommand request, CancellationToken ct)
         {
-            var p = await _repo.GetByIdAsync(request.Id, ct) ?? throw new KeyNotFoundException("PrepaidInvoice not found.");
+            var p = await _repo.GetByIdAsync(request.Id, ct)
+                    ?? throw new KeyNotFoundException("PrepaidInvoice not found.");
             var before = p.Status;
 
             if (p.IsExpired())
@@ -57,7 +59,7 @@ namespace GatewayService.AccountCharge.Application.Commands.Prepaid
                 p.MarkExpired();
                 await _repo.UpdateAsync(p, ct);
                 await _uow.SaveChangesAsync(ct);
-                return before != p.Status;
+                return new(Updated: before != p.Status, Duplicate: false, AccountingInvoiceId: null);
             }
 
             var alreadyAppliedOnLegacy = await _legacyInvoices.HasAnyAppliedDepositAsync(p.TxHash, ct);
@@ -65,9 +67,8 @@ namespace GatewayService.AccountCharge.Application.Commands.Prepaid
                 _log.LogInformation("PrepaidInvoice {Id}: Tx {Tx} already applied on legacy. Will skip Accounting.", p.Id, p.TxHash);
 
             var wallets = await _nobitex.GetWalletsAsync(ct);
-            var wantedSymbol = AssetMapper.NormalizeCurrency(p.Currency); // upper
+            var wantedSymbol = AssetMapper.NormalizeCurrency(p.Currency);
             var candidateWallets = wallets.Where(w => AssetMapper.NormalizeCurrency(w.Currency) == wantedSymbol).ToList();
-
             if (candidateWallets.Count == 0)
                 throw new InvalidOperationException($"No Nobitex wallet for currency {p.Currency}");
 
@@ -84,7 +85,7 @@ namespace GatewayService.AccountCharge.Application.Commands.Prepaid
             {
                 await _repo.UpdateAsync(p, ct);
                 await _uow.SaveChangesAsync(ct);
-                return before != p.Status;
+                return new(Updated: before != p.Status, Duplicate: false, AccountingInvoiceId: null);
             }
 
             if (!string.Equals(dep.Currency, p.Currency, StringComparison.OrdinalIgnoreCase))
@@ -92,7 +93,7 @@ namespace GatewayService.AccountCharge.Application.Commands.Prepaid
                 p.MarkRejectedCurrencyMismatch(dep.Currency, dep.CreatedAt);
                 await _repo.UpdateAsync(p, ct);
                 await _uow.SaveChangesAsync(ct);
-                return before != p.Status;
+                return new(Updated: before != p.Status, Duplicate: false, AccountingInvoiceId: null);
             }
 
             var opts = _opts.Get(dep.Currency, dep.Network ?? string.Empty);
@@ -103,7 +104,7 @@ namespace GatewayService.AccountCharge.Application.Commands.Prepaid
                                dep.Address, dep.Tag, dep.WalletId == 0 ? null : dep.WalletId, dep.CreatedAt);
                 await _repo.UpdateAsync(p, ct);
                 await _uow.SaveChangesAsync(ct);
-                return before != p.Status;
+                return new(Updated: before != p.Status, Duplicate: false, AccountingInvoiceId: null);
             }
 
             // Paid snapshot
@@ -113,52 +114,50 @@ namespace GatewayService.AccountCharge.Application.Commands.Prepaid
             await _repo.UpdateAsync(p, ct);
             await _uow.SaveChangesAsync(ct);
 
-            if (!alreadyAppliedOnLegacy)
+            // Skip Accounting if legacy already applied
+            if (alreadyAppliedOnLegacy)
+                return new(Updated: before != p.Status, Duplicate: false, AccountingInvoiceId: null);
+
+            Guid? accInvoiceId = null;
+            try
             {
-                try
+                if (!string.IsNullOrWhiteSpace(p.CustomerId) && Guid.TryParse(p.CustomerId, out var ext))
                 {
-                    if (!string.IsNullOrWhiteSpace(p.CustomerId) && Guid.TryParse(p.CustomerId, out var ext))
-                    {
-                        var src = dep.Currency.ToUpperInvariant();
-                        decimal usdtAmount;
+                    var src = dep.Currency.ToUpperInvariant();
+                    decimal usdtAmount = src == "USDT"
+                        ? dep.Amount
+                        : decimal.Round(dep.Amount * await _prices.GetUsdtQuoteAsync(src, dep.CreatedAt, ct), 6, MidpointRounding.ToEven);
 
-                        if (src == "USDT")
-                        {
-                            usdtAmount = dep.Amount;
-                        }
-                        else
-                        {
-                            var rate = await _prices.GetUsdtQuoteAsync(src, dep.CreatedAt, ct);
-                            usdtAmount = decimal.Round(dep.Amount * rate, 6, MidpointRounding.ToEven);
-                        }
+                    var res = await _accounting.CreateDepositAsync(
+                        externalCustomerId: ext,
+                        amount: usdtAmount,
+                        currency: "USDT",
+                        occurredAt: dep.CreatedAt,
+                        idempotencyKey: p.TxHash,
+                        ct: ct);
 
-                        await _accounting.CreateDepositAsync(
-                            externalCustomerId: ext,
-                            amount: usdtAmount,
-                            currency: "USDT",
-                            occurredAt: dep.CreatedAt,
-                            idempotencyKey: p.TxHash,
-                            ct: ct);
-                    }
-                    else
+                    if (res.Duplicate)
                     {
-                        _log.LogWarning("PrepaidInvoice {Id}: CustomerId is not a Guid; skipping Accounting.", p.Id);
+                        _log.LogInformation("PrepaidInvoice {Id}: duplicate in Accounting. Invoice {InvoiceId}", p.Id, res.InvoiceId);
+                        return new(Updated: before != p.Status, Duplicate: true, AccountingInvoiceId: res.InvoiceId);
                     }
+
+                    accInvoiceId = res.InvoiceId;
                 }
-                catch (Exception ex)
+                else
                 {
-                    _log.LogError(ex, "Accounting sync (USDT) failed for PrepaidInvoice {Id} (Tx {Tx})", p.Id, p.TxHash);
-                    p.MarkAccountingSyncFailed();
-                    await _repo.UpdateAsync(p, ct);
-                    await _uow.SaveChangesAsync(ct);
+                    _log.LogWarning("PrepaidInvoice {Id}: CustomerId is not a Guid; skipping Accounting.", p.Id);
                 }
             }
-            else
+            catch (Exception ex)
             {
-                _log.LogInformation("PrepaidInvoice {Id}: Skipped Accounting because tx is already applied on legacy.", p.Id);
+                _log.LogError(ex, "Accounting sync failed for PrepaidInvoice {Id} (Tx {Tx})", p.Id, p.TxHash);
+                p.MarkAccountingSyncFailed();
+                await _repo.UpdateAsync(p, ct);
+                await _uow.SaveChangesAsync(ct);
             }
 
-            return before != p.Status;
+            return new(Updated: before != p.Status, Duplicate: false, AccountingInvoiceId: accInvoiceId);
         }
     }
 }
